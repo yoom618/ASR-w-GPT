@@ -180,6 +180,14 @@ class Wav2Vec2GPTConfig(PretrainedConfig):
             Dimensionality of the encoder output layer. If not defined, this defaults to *hidden-size*. Only relevant
             if `add_adapter is True`.
 
+
+
+        n_positions (`int`, *optional*, defaults to 1024):
+            The maximum sequence length that this model might ever be used with. Typically set this to something large
+            just in case (e.g., 512 or 1024 or 2048).
+        n_embd (`int`, *optional*, defaults to 768):
+            Dimensionality of the embeddings and hidden states.
+
     Example:
 
     ```python
@@ -194,11 +202,19 @@ class Wav2Vec2GPTConfig(PretrainedConfig):
     >>> # Accessing the model configuration
     >>> configuration = model.config
     ```"""
-    model_type = "wav2vec2"
+
+
+    model_type = "wav2vec2gpt"
+    keys_to_ignore_at_inference = ["past_key_values"]
+    attribute_map = {
+        "n_embd": "hidden_size",
+        "n_head": "num_attention_heads",
+        "n_layer": "num_hidden_layers",
+    }
 
     def __init__(
         self,
-        vocab_size=32,
+        vocab_size=50257,
         hidden_size=768,
         num_hidden_layers=12,
         num_attention_heads=12,
@@ -244,17 +260,35 @@ class Wav2Vec2GPTConfig(PretrainedConfig):
         tdnn_kernel=(5, 3, 3, 1, 1),
         tdnn_dilation=(1, 2, 3, 1, 1),
         xvector_output_dim=512,
-        pad_token_id=0,
-        bos_token_id=1,
-        eos_token_id=2,
-        add_adapter=True,
+        # pad_token_id=50256,
+        bos_token_id=50256,
+        eos_token_id=50256,
+        add_adapter=False,
         adapter_kernel_size=3,
         adapter_stride=2,
         num_adapter_layers=3,
         # output_hidden_size=None,
+
+
+        n_positions=1024,
+        n_inner=None,
+        activation_function="gelu_new",
+        resid_pdrop=0.1,
+        embd_pdrop=0.1,
+        attn_pdrop=0.1,
+        layer_norm_epsilon=1e-5,
+        summary_type="cls_index",
+        summary_use_proj=True,
+        summary_activation=None,
+        summary_proj_to_labels=True,
+        summary_first_dropout=0.1,
+        scale_attn_weights=True,
+        use_cache=True,
+        scale_attn_by_inverse_layer_idx=False,
+        reorder_and_upcast_attn=False,
         **kwargs
     ):
-        super().__init__(**kwargs, pad_token_id=pad_token_id, bos_token_id=bos_token_id, eos_token_id=eos_token_id)
+        super().__init__(**kwargs, bos_token_id=bos_token_id, eos_token_id=eos_token_id)
         self.hidden_size = hidden_size
         self.feat_extract_norm = feat_extract_norm
         self.feat_extract_activation = feat_extract_activation
@@ -333,8 +367,29 @@ class Wav2Vec2GPTConfig(PretrainedConfig):
         self.xvector_output_dim = xvector_output_dim
         
         
-        
-        
+        self.vocab_size = vocab_size
+        self.n_positions = n_positions
+        self.n_inner = n_inner
+        self.activation_function = activation_function
+        self.resid_pdrop = resid_pdrop
+        self.embd_pdrop = embd_pdrop
+        self.attn_pdrop = attn_pdrop
+        self.layer_norm_epsilon = layer_norm_epsilon
+        self.summary_type = summary_type
+        self.summary_use_proj = summary_use_proj
+        self.summary_activation = summary_activation
+        self.summary_first_dropout = summary_first_dropout
+        self.summary_proj_to_labels = summary_proj_to_labels
+        self.scale_attn_weights = scale_attn_weights
+        self.use_cache = use_cache
+        self.scale_attn_by_inverse_layer_idx = scale_attn_by_inverse_layer_idx
+        self.reorder_and_upcast_attn = reorder_and_upcast_attn
+
+        self.bos_token_id = bos_token_id
+        self.eos_token_id = eos_token_id
+
+        super().__init__(bos_token_id=bos_token_id, eos_token_id=eos_token_id, **kwargs)
+
 
     @property
     def inputs_to_logits_ratio(self):

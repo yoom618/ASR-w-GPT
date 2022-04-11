@@ -196,16 +196,16 @@ class GPT2fromEmbedding(GPT2PreTrainedModel):
             attention_mask = attention_mask.to(dtype=self.dtype)  # fp16 compatibility
             attention_mask = (1.0 - attention_mask) * -10000.0
 
-        # If a 2D or 3D attention mask is provided for the cross-attention
-        # we need to make broadcastable to [batch_size, num_heads, seq_length, seq_length]
-        if self.config.add_cross_attention and encoder_hidden_states is not None:
-            encoder_batch_size, encoder_sequence_length, _ = encoder_hidden_states.size()
-            encoder_hidden_shape = (encoder_batch_size, encoder_sequence_length)
-            if encoder_attention_mask is None:
-                encoder_attention_mask = torch.ones(encoder_hidden_shape, device=device)
-            encoder_attention_mask = self.invert_attention_mask(encoder_attention_mask)
-        else:
-            encoder_attention_mask = None
+        # # If a 2D or 3D attention mask is provided for the cross-attention
+        # # we need to make broadcastable to [batch_size, num_heads, seq_length, seq_length]
+        # if self.config.add_cross_attention and encoder_hidden_states is not None:
+        #     encoder_batch_size, encoder_sequence_length, _ = encoder_hidden_states.size()
+        #     encoder_hidden_shape = (encoder_batch_size, encoder_sequence_length)
+        #     if encoder_attention_mask is None:
+        #         encoder_attention_mask = torch.ones(encoder_hidden_shape, device=device)
+        #     encoder_attention_mask = self.invert_attention_mask(encoder_attention_mask)
+        # else:
+        #     encoder_attention_mask = None
 
         # Prepare head mask if needed
         # 1.0 in head_mask indicate we keep the head
@@ -321,11 +321,171 @@ class GPT2fromEmbedding(GPT2PreTrainedModel):
 
 
 
+@add_start_docstrings(
+    """
+    The GPT2 Model transformer that starts with `inputs_embeds` with a language modeling head on top (linear layer with weights tied to the input
+    embeddings).
+    """,
+    GPT2_START_DOCSTRING,
+)
+class GPT2LMfromEmbedding(GPT2PreTrainedModel):
+    _keys_to_ignore_on_load_missing = [r"attn.masked_bias", r"attn.bias", r"lm_head.weight"]
 
+    def __init__(self, config):
+        super().__init__(config)
+        self.transformer = GPT2Model(config)
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
+        # Model parallel
+        self.model_parallel = False
+        self.device_map = None
 
+        # Initialize weights and apply final processing
+        self.post_init()
 
+    @add_start_docstrings(PARALLELIZE_DOCSTRING)
+    def parallelize(self, device_map=None):
+        self.device_map = (
+            get_device_map(len(self.transformer.h), range(torch.cuda.device_count()))
+            if device_map is None
+            else device_map
+        )
+        assert_device_map(self.device_map, len(self.transformer.h))
+        self.transformer.parallelize(self.device_map)
+        self.lm_head = self.lm_head.to(self.transformer.first_device)
+        self.model_parallel = True
 
+    @add_start_docstrings(DEPARALLELIZE_DOCSTRING)
+    def deparallelize(self):
+        self.transformer.deparallelize()
+        self.transformer = self.transformer.to("cpu")
+        self.lm_head = self.lm_head.to("cpu")
+        self.model_parallel = False
+        torch.cuda.empty_cache()
+
+    def get_output_embeddings(self):
+        return self.lm_head
+
+    def set_output_embeddings(self, new_embeddings):
+        self.lm_head = new_embeddings
+
+    def prepare_inputs_for_generation(self, input_ids, past=None, **kwargs):
+        token_type_ids = kwargs.get("token_type_ids", None)
+        # only last token for inputs_ids if past is defined in kwargs
+        if past:
+            input_ids = input_ids[:, -1].unsqueeze(-1)
+            if token_type_ids is not None:
+                token_type_ids = token_type_ids[:, -1].unsqueeze(-1)
+
+        attention_mask = kwargs.get("attention_mask", None)
+        position_ids = kwargs.get("position_ids", None)
+
+        if attention_mask is not None and position_ids is None:
+            # create position_ids on the fly for batch generation
+            position_ids = attention_mask.long().cumsum(-1) - 1
+            position_ids.masked_fill_(attention_mask == 0, 1)
+            if past:
+                position_ids = position_ids[:, -1].unsqueeze(-1)
+        else:
+            position_ids = None
+        return {
+            "input_ids": input_ids,
+            "past_key_values": past,
+            "use_cache": kwargs.get("use_cache"),
+            "position_ids": position_ids,
+            "attention_mask": attention_mask,
+            "token_type_ids": token_type_ids,
+        }
+
+    @add_start_docstrings_to_model_forward(GPT2_INPUTS_DOCSTRING)
+    @add_code_sample_docstrings(
+        processor_class=_PROCESSOR_FOR_DOC,
+        checkpoint=_CHECKPOINT_FOR_DOC,
+        output_type=CausalLMOutputWithCrossAttentions,
+        config_class=_CONFIG_FOR_DOC,
+    )
+    def forward(
+        self,
+        # input_ids=None,
+        past_key_values=None,
+        attention_mask=None,
+        # token_type_ids=None,
+        position_ids=None,
+        head_mask=None,
+        inputs_embeds=None,
+        # encoder_hidden_states=None,
+        # encoder_attention_mask=None,
+        labels=None,
+        use_cache=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+    ):
+        r"""
+        labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
+            Labels for language modeling. Note that the labels **are shifted** inside the model, i.e. you can set
+            `labels = input_ids` Indices are selected in `[-100, 0, transformers., config.vocab_size]` All labels set to `-100`
+            are ignored (masked), the loss is only computed for labels in `[0, transformers., config.vocab_size]`
+        """
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        transformer_outputs = self.transformer(
+            # input_ids,
+            past_key_values=past_key_values,
+            attention_mask=attention_mask,
+            # token_type_ids=token_type_ids,
+            position_ids=position_ids,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            # encoder_hidden_states=encoder_hidden_states,
+            # encoder_attention_mask=encoder_attention_mask,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+        hidden_states = transformer_outputs[0]
+
+        # Set device for model parallelism
+        if self.model_parallel:
+            torch.cuda.set_device(self.transformer.first_device)
+            hidden_states = hidden_states.to(self.lm_head.weight.device)
+
+        lm_logits = self.lm_head(hidden_states)
+
+        loss = None
+        if labels is not None:
+            # Shift so that tokens < n predict n
+            shift_logits = lm_logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            # Flatten the tokens
+            loss_fct = CrossEntropyLoss()
+            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+
+        if not return_dict:
+            output = (lm_logits,) + transformer_outputs[1:]
+            return ((loss,) + output) if loss is not None else output
+
+        return CausalLMOutputWithCrossAttentions(
+            loss=loss,
+            logits=lm_logits,
+            past_key_values=transformer_outputs.past_key_values,
+            hidden_states=transformer_outputs.hidden_states,
+            attentions=transformer_outputs.attentions,
+            cross_attentions=transformer_outputs.cross_attentions,
+        )
+
+    @staticmethod
+    def _reorder_cache(past: Tuple[Tuple[torch.Tensor]], beam_idx: torch.Tensor) -> Tuple[Tuple[torch.Tensor]]:
+        """
+        This function is used to re-order the `past_key_values` cache if [`~PreTrainedModel.beam_search`] or
+        [`~PreTrainedModel.beam_sample`] is called. This is required to match `past_key_values` with the correct
+        beam_idx at every generation step.
+        """
+        return tuple(
+            tuple(past_state.index_select(0, beam_idx.to(past_state.device)) for past_state in layer_past)
+            for layer_past in past
+        )
 
 
 
@@ -346,10 +506,14 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
                 "or define `vocab_size` of your model's configuration."
             )
         
-        self.wav2vec2 = Wav2Vec2Model(config) # Use adapter as speech -> word embedding transfer
+        self.wav2vec2 = Wav2Vec2Model(config)
         
-        self.transformer = GPT2fromEmbedding(config)
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.rnn_compressor = nn.GRU(input_size=config.hidden_size, hidden_size=config.hidden_size, num_layers=1, batch_first=True)
+        self.adaPool = nn.AdaptiveMaxPool1d(config.n_positions, return_indices=True)
+        self.n_hidden = config.hidden_size
+
+
+        self.gpt2lm = GPT2LMfromEmbedding(config)
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -369,8 +533,12 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
         for param in self.wav2vec2.adapter.parameters():
             param.requires_grad = False
     
+    def freeze_rnn_compressor(self):
+        for param in self.wav2vec2.adapter.parameters():
+            param.requires_grad = False
+    
     def freeze_gpt_decoder(self):
-        for param in self.transformer.parameters():
+        for param in self.gpt2lm.parameters():
             param.requires_grad = False
 
     @add_start_docstrings_to_model_forward(WAV_2_VEC_2_INPUTS_DOCSTRING)
@@ -384,12 +552,17 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
     )
     def forward(
         self,
-        input_values,
-        attention_mask=None,
-        output_attentions=None,
-        output_hidden_states=None,
-        return_dict=None,
+        input_values,  # wav input
+        attention_mask=None,  # wav attention mask
+        output_attentions_wav2vec=None,
+        output_hidden_states_wav2vec=None, 
+        return_dict_wav2vec=None,
+
+        output_attentions_gpt2=None,
+        output_hidden_states_gpt2=None, 
+        return_dict_gpt2=None,
         labels=None,
+        use_cache=None,
     ):
         r"""
         labels (`torch.LongTensor` of shape `(batch_size, target_length)`, *optional*):
@@ -404,52 +577,38 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
         outputs = self.wav2vec2(
             input_values,
             attention_mask=attention_mask,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
+            output_attentions=output_attentions_wav2vec,
+            output_hidden_states=output_hidden_states_wav2vec,
+            return_dict=return_dict_wav2vec,
         )
 
-        hidden_states = outputs[0]
-        hidden_states = self.dropout(hidden_states)
+        hidden_states = outputs.last_hidden_state
+        # wav2vec_extracted_feature = outputs.extract_features
+        # wav2vec_hidden_states = outputs.hidden_states if output_hidden_states_wav2vec else None
+        # wav2vec_attentions = outputs.attentions if output_attentions_wav2vec else None
+        
+        hidden_states = self.dropout(hidden_states) # size: (batch_size, seq_len_from_adapter, config.hidden_states=768)
 
-        logits = self.lm_head(hidden_states)
+        embedding_w_attention_from_RNN = self.rnn_compressor(hidden_states) # batch_first is True. size: (batch_size, seq_len, config.hidden_states + 1)
+        word_indices = self.adaPool(embedding_w_attention_from_RNN[:,:,-1])[1]
+        word_embeddings = torch.gather(embedding_w_attention_from_RNN[:,:,:-1], 
+                                       1, 
+                                       word_indices.unsqueeze(-1).expand(-1,-1,self.n_hidden))
+        
 
-        loss = None
-        if labels is not None:
-
-            if labels.max() >= self.config.vocab_size:
-                raise ValueError(f"Label values must be <= vocab_size: {self.config.vocab_size}")
-
-            # retrieve loss input_lengths from attention_mask
-            attention_mask = (
-                attention_mask if attention_mask is not None else torch.ones_like(input_values, dtype=torch.long)
-            )
-            input_lengths = self._get_feat_extract_output_lengths(attention_mask.sum(-1)).to(torch.long)
-
-            # assuming that padded tokens are filled with -100
-            # when not being attended to
-            labels_mask = labels >= 0
-            target_lengths = labels_mask.sum(-1)
-            flattened_targets = labels.masked_select(labels_mask)
-
-            # ctc_loss doesn't support fp16
-            log_probs = nn.functional.log_softmax(logits, dim=-1, dtype=torch.float32).transpose(0, 1)
-
-            with torch.backends.cudnn.flags(enabled=False):
-                loss = nn.functional.ctc_loss(
-                    log_probs,
-                    flattened_targets,
-                    input_lengths,
-                    target_lengths,
-                    blank=self.config.pad_token_id,
-                    reduction=self.config.ctc_loss_reduction,
-                    zero_infinity=self.config.ctc_zero_infinity,
-                )
-
-        if not return_dict:
-            output = (logits,) + outputs[_HIDDEN_STATES_START_POSITION:]
-            return ((loss,) + output) if loss is not None else output
-
-        return CausalLMOutput(
-            loss=loss, logits=logits, hidden_states=outputs.hidden_states, attentions=outputs.attentions
-        )
+        return self.gpt2lm(
+            ### input_ids=None,
+            # past_key_values=None,
+            attention_mask=None,
+            ### token_type_ids=None,
+            position_ids=None,
+            head_mask=None,
+            inputs_embeds=word_embeddings,
+            ### encoder_hidden_states=None,
+            ### encoder_attention_mask=None,
+            labels=labels,
+            use_cache=use_cache,
+            output_attentions=output_attentions_gpt2,
+            output_hidden_states=output_hidden_states_gpt2,
+            return_dict=return_dict_gpt2,
+        ) # Type: CausalLMOutputWithCrossAttentions
