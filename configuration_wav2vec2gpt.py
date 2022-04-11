@@ -41,10 +41,10 @@ class Wav2Vec2GPTConfig(PretrainedConfig):
 
     Args:
         vocab_size (`int`, *optional*, defaults to 32):
-            Vocabulary size of the Wav2Vec2 model. Defines the number of different tokens that can be represented by
-            the `inputs_ids` passed when calling [`Wav2Vec2Model`] or [`TFWav2Vec2Model`]. Vocabulary size of the
-            model. Defines the different tokens that can be represented by the *inputs_ids* passed to the forward
-            method of [`Wav2Vec2Model`].
+            Vocabulary size of the Wav2Vec2GPT model. Defines the number of different tokens that can be represented by
+            the `inputs_ids` passed when calling [`Wav2Vec2GPTModel`]. Vocabulary size of the model. Defines the 
+            different tokens that can be represented by the *inputs_ids* passed to the forward method of 
+            [`Wav2Vec2GPTModel`].
         hidden_size (`int`, *optional*, defaults to 768):
             Dimensionality of the encoder layers and the pooler layer.
         num_hidden_layers (`int`, *optional*, defaults to 12):
@@ -247,11 +247,11 @@ class Wav2Vec2GPTConfig(PretrainedConfig):
         pad_token_id=0,
         bos_token_id=1,
         eos_token_id=2,
-        add_adapter=False,
+        add_adapter=True,
         adapter_kernel_size=3,
         adapter_stride=2,
         num_adapter_layers=3,
-        output_hidden_size=None,
+        # output_hidden_size=None,
         **kwargs
     ):
         super().__init__(**kwargs, pad_token_id=pad_token_id, bos_token_id=bos_token_id, eos_token_id=eos_token_id)
@@ -321,7 +321,7 @@ class Wav2Vec2GPTConfig(PretrainedConfig):
         self.adapter_kernel_size = adapter_kernel_size
         self.adapter_stride = adapter_stride
         self.num_adapter_layers = num_adapter_layers
-        self.output_hidden_size = output_hidden_size or hidden_size
+        self.output_hidden_size = hidden_size # HERE, we use output_hidden_size as GPT's hidden_size
 
         # SequenceClassification-specific parameter. Feel free to ignore for other classes.
         self.classifier_proj_size = classifier_proj_size
@@ -331,6 +331,10 @@ class Wav2Vec2GPTConfig(PretrainedConfig):
         self.tdnn_kernel = list(tdnn_kernel)
         self.tdnn_dilation = list(tdnn_dilation)
         self.xvector_output_dim = xvector_output_dim
+        
+        
+        
+        
 
     @property
     def inputs_to_logits_ratio(self):
