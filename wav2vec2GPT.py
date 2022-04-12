@@ -591,7 +591,12 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
         self.wav2vec2 = Wav2Vec2Model2(config)
         self.dropout = nn.Dropout(config.final_dropout)
         
-        self.rnn_compressor = nn.GRU(input_size=config.hidden_size, hidden_size=(config.hidden_size + 1), num_layers=1, batch_first=True)
+        self.rnn_compressor = nn.GRU(input_size=config.hidden_size, 
+                                     hidden_size=(config.hidden_size + 1), 
+                                     num_layers=1, 
+#                                      bias=False,
+                                     dropout=0.1,
+                                     batch_first=True)
         self.adaPool = nn.AdaptiveMaxPool1d(config.n_positions, return_indices=True)
         self.n_hidden = config.hidden_size
 
@@ -674,6 +679,7 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
         return_dict_wav2vec=None,
 
         output_attention_mask=None,  # text attention mask
+        output_max_length=1024,
         output_attentions_gpt2=None,
         output_hidden_states_gpt2=None, 
         return_dict_gpt2=None,
@@ -700,17 +706,21 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
         )
 
         hidden_states = outputs.last_hidden_state
-        # wav2vec_extracted_feature = outputs.extract_features
-        # wav2vec_hidden_states = outputs.hidden_states if output_hidden_states_wav2vec else None
-        # wav2vec_attentions = outputs.attentions if output_attentions_wav2vec else None
         
         hidden_states = self.dropout(hidden_states) # size: (batch_size, seq_len_from_adapter, config.hidden_states=768)
 
+        ###### Adjust Pooling 1024 items
         output_from_RNN, _ = self.rnn_compressor(hidden_states) # batch_first is True. size: (batch_size, seq_len, config.hidden_states + 1)
-        word_indices = self.adaPool(output_from_RNN[:,:,-1])[1]
+        # word_indices = self.adaPool(output_from_RNN[:,:,-1])[1]
+        word_indices = self.adaPool(output_from_RNN[:,:-1,-1] - output_from_RNN[:,1:,-1])[1] # 가장 급격하게 떨어지는 구간 앞
+        
         word_embeddings = torch.gather(output_from_RNN[:,:,:-1], 
                                        1, 
                                        word_indices.unsqueeze(-1).expand(-1,-1,self.n_hidden))
+        # attention_weight = torch.gather(output_from_RNN[:,:,-1], 
+        #                                 1, 
+        #                                 word_indices).unsqueeze(-1).expand(-1,-1,self.n_hidden)
+        # word_embeddings = word_embeddings * attention_weight
         
 
         return self.gpt2lm(
@@ -729,4 +739,7 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
             output_hidden_states=output_hidden_states_gpt2,
             return_dict=return_dict_gpt2,
         ) # Type: CausalLMOutputWithCrossAttentions
+
+
+
 

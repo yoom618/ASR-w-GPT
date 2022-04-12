@@ -261,10 +261,9 @@ class Wav2Vec2GPTConfig(PretrainedConfig):
         tdnn_kernel=(5, 3, 3, 1, 1),
         tdnn_dilation=(1, 2, 3, 1, 1),
         xvector_output_dim=512,
-        pad_token_id=220, # blank index of GPT Tokenizer. `tokenizer.encoder['Ġ']`
-#         bos_token_id=50256,
-        bos_token_id=None,
-        eos_token_id=220,
+        pad_token_id=50256,
+        bos_token_id=50256,
+        eos_token_id=50256,
         add_adapter=False,
         adapter_kernel_size=3,
         adapter_stride=2,
@@ -290,7 +289,7 @@ class Wav2Vec2GPTConfig(PretrainedConfig):
         reorder_and_upcast_attn=False,
         **kwargs
     ):
-        # super().__init__(**kwargs, bos_token_id=bos_token_id, eos_token_id=eos_token_id)
+        super().__init__(**kwargs, bos_token_id=bos_token_id, eos_token_id=eos_token_id)
         self.hidden_size = hidden_size
         self.feat_extract_norm = feat_extract_norm
         self.feat_extract_activation = feat_extract_activation
@@ -387,8 +386,6 @@ class Wav2Vec2GPTConfig(PretrainedConfig):
         self.scale_attn_by_inverse_layer_idx = scale_attn_by_inverse_layer_idx
         self.reorder_and_upcast_attn = reorder_and_upcast_attn
 
-        
-        self.pad_token_id = pad_token_id,
         self.bos_token_id = bos_token_id
         self.eos_token_id = eos_token_id
         for key in self.attribute_map:

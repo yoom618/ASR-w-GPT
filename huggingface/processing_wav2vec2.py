@@ -18,7 +18,7 @@ Speech processor class for Wav2Vec2
 import warnings
 from contextlib import contextmanager
 
-from transformers import ProcessorMixin
+from transformers.processing_utils import ProcessorMixin
 from transformers import Wav2Vec2FeatureExtractor
 from transformers import Wav2Vec2CTCTokenizer
 
