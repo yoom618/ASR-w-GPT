@@ -116,10 +116,6 @@ class Wav2Vec2Model2(Wav2Vec2PreTrainedModel):
         )
 
 
-
-
-
-
 @add_start_docstrings(
     "The basic GPT2 Model transformer that starts from `inputs_embeds` not `input_ids`.",
     GPT2_START_DOCSTRING,
@@ -502,6 +498,7 @@ class GPT2LMfromEmbedding(GPT2LMHeadModel):
         output_attentions=None,
         output_hidden_states=None,
         return_dict=None,
+        output_attention_mask=None
     ):
         r"""
         labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
@@ -537,12 +534,39 @@ class GPT2LMfromEmbedding(GPT2LMHeadModel):
 
         loss = None
         if labels is not None:
-            # Shift so that tokens < n predict n
-            shift_logits = lm_logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
+            # # Shift so that tokens < n predict n
+            # shift_logits = lm_logits[..., 1:, :].contiguous()
+            # shift_labels = labels[..., :-1].contiguous()
+            # DO NOT Shift
+            shift_logits = lm_logits[..., :, :].contiguous()
+            shift_labels = labels[..., :].contiguous()
             # Flatten the tokens
             loss_fct = CrossEntropyLoss()
             loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+
+            # input_lengths is fixed in this model
+            input_lengths = torch.ones_like(output_attention_mask, dtype=torch.long).sum(-1)
+
+            # assuming that padded tokens are filled with 'Ġ'
+            # when not being attended to
+            labels_mask = (output_attention_mask > 0)
+            target_lengths = labels_mask.sum(-1)
+            flattened_targets = labels.masked_select(labels_mask)
+            
+            # ctc_loss doesn't support fp16
+            log_probs = nn.functional.log_softmax(lm_logits, dim=-1, dtype=torch.float32).transpose(0, 1)
+        
+        with torch.backends.cudnn.flags(enabled=False):
+            loss += nn.functional.ctc_loss(
+                log_probs,
+                flattened_targets,
+                input_lengths,
+                target_lengths,
+                blank=self.config.pad_token_id,
+                reduction=self.config.ctc_loss_reduction,
+                zero_infinity=self.config.ctc_zero_infinity,
+            ) * 1e-3
+
 
         if not return_dict:
             output = (lm_logits,) + transformer_outputs[1:]
@@ -595,7 +619,7 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
                                      hidden_size=(config.hidden_size + 1), 
                                      num_layers=1, 
 #                                      bias=False,
-                                     dropout=0.1,
+#                                      dropout=0.1,
                                      batch_first=True)
         self.adaPool = nn.AdaptiveMaxPool1d(config.n_positions, return_indices=True)
         self.n_hidden = config.hidden_size
@@ -711,22 +735,17 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
 
         ###### Adjust Pooling 1024 items
         output_from_RNN, _ = self.rnn_compressor(hidden_states) # batch_first is True. size: (batch_size, seq_len, config.hidden_states + 1)
-        # word_indices = self.adaPool(output_from_RNN[:,:,-1])[1]
         word_indices = self.adaPool(output_from_RNN[:,:-1,-1] - output_from_RNN[:,1:,-1])[1] # 가장 급격하게 떨어지는 구간 앞
         
         word_embeddings = torch.gather(output_from_RNN[:,:,:-1], 
                                        1, 
                                        word_indices.unsqueeze(-1).expand(-1,-1,self.n_hidden))
-        # attention_weight = torch.gather(output_from_RNN[:,:,-1], 
-        #                                 1, 
-        #                                 word_indices).unsqueeze(-1).expand(-1,-1,self.n_hidden)
-        # word_embeddings = word_embeddings * attention_weight
         
 
         return self.gpt2lm(
             ### input_ids=None,
             # past_key_values=None,
-            attention_mask=output_attention_mask,
+            # attention_mask=None,
             ### token_type_ids=None,
             position_ids=None,
             head_mask=None,
@@ -738,7 +757,10 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
             output_attentions=output_attentions_gpt2,
             output_hidden_states=output_hidden_states_gpt2,
             return_dict=return_dict_gpt2,
+            
+            output_attention_mask=output_attention_mask,
         ) # Type: CausalLMOutputWithCrossAttentions
+
 
 
 
