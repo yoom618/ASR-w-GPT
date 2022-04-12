@@ -15,8 +15,8 @@ import warnings
 
 
 from huggingface.modeling_wav2vec2 import *
-from huggingface.modeling_wav2vec2 import _compute_mask_indices
 from huggingface.modeling_gpt2 import *
+from huggingface.modeling_gpt2 import GPT2_START_DOCSTRING, GPT2_INPUTS_DOCSTRING, PARALLELIZE_DOCSTRING, DEPARALLELIZE_DOCSTRING
 from configuration_wav2vec2gpt import Wav2Vec2GPTConfig
 
 
@@ -40,10 +40,91 @@ _CTC_EXPECTED_LOSS = 100000
 
 
 @add_start_docstrings(
+    "The bare Wav2Vec2 Model transformer outputting raw hidden-states without any specific head on top.",
+    WAV_2_VEC_2_START_DOCSTRING,
+)
+class Wav2Vec2Model2(Wav2Vec2PreTrainedModel):
+    def __init__(self, config: Wav2Vec2Config):
+        super().__init__(config)
+        self.config = config
+        self.feature_extractor = Wav2Vec2FeatureEncoder(config)
+        self.feature_projection = Wav2Vec2FeatureProjection(config)
+
+        self.adapter = Wav2Vec2Adapter(config) if config.add_adapter else None
+
+        # Initialize weights and apply final processing
+        self.post_init()
+
+    def freeze_feature_extractor(self):
+        """
+        Calling this function will disable the gradient computation for the feature encoder so that its parameters will
+        not be updated during training.
+        """
+        warnings.warn(
+            "The method `freeze_feature_extractor` is deprecated and will be removed in Transformers v5."
+            "Please use the equivalent `freeze_feature_encoder` method instead.",
+            FutureWarning,
+        )
+        self.freeze_feature_encoder()
+
+    def freeze_feature_encoder(self):
+        """
+        Calling this function will disable the gradient computation for the feature encoder so that its parameter will
+        not be updated during training.
+        """
+        self.feature_extractor._freeze_parameters()
+
+
+    @add_start_docstrings_to_model_forward(WAV_2_VEC_2_INPUTS_DOCSTRING)
+    @add_code_sample_docstrings(
+        processor_class=_PROCESSOR_FOR_DOC,
+        checkpoint=_CHECKPOINT_FOR_DOC,
+        output_type=Wav2Vec2BaseModelOutput,
+        config_class=_CONFIG_FOR_DOC,
+        modality="audio",
+        expected_output=_EXPECTED_OUTPUT_SHAPE,
+    )
+    def forward(
+        self,
+        input_values,
+        attention_mask=None,
+        mask_time_indices=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+    ):
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        extract_features = self.feature_extractor(input_values)
+        extract_features = extract_features.transpose(1, 2)
+
+        hidden_states, extract_features = self.feature_projection(extract_features)
+
+        if self.adapter is not None:
+            hidden_states = self.adapter(hidden_states)
+
+        if not return_dict:
+            return (hidden_states, extract_features)
+
+        return Wav2Vec2BaseModelOutput(
+            last_hidden_state=hidden_states,
+            extract_features=extract_features,
+        )
+
+
+
+
+
+
+@add_start_docstrings(
     "The basic GPT2 Model transformer that starts from `inputs_embeds` not `input_ids`.",
     GPT2_START_DOCSTRING,
 )
-class GPT2fromEmbedding(GPT2PreTrainedModel):
+class GPT2fromEmbedding(GPT2Model):
     _keys_to_ignore_on_load_missing = ["attn.masked_bias"]
 
     def __init__(self, config):
@@ -112,13 +193,13 @@ class GPT2fromEmbedding(GPT2PreTrainedModel):
         for layer, heads in heads_to_prune.items():
             self.h[layer].attn.prune_heads(heads)
 
-    @add_start_docstrings_to_model_forward(GPT2_INPUTS_DOCSTRING)
-    @add_code_sample_docstrings(
-        processor_class=_PROCESSOR_FOR_DOC,
-        checkpoint=_CHECKPOINT_FOR_DOC,
-        output_type=BaseModelOutputWithPastAndCrossAttentions,
-        config_class=_CONFIG_FOR_DOC,
-    )
+#     @add_start_docstrings_to_model_forward(GPT2_INPUTS_DOCSTRING)
+#     @add_code_sample_docstrings(
+#         processor_class=_PROCESSOR_FOR_DOC,
+#         checkpoint=_CHECKPOINT_FOR_DOC,
+#         output_type=BaseModelOutputWithPastAndCrossAttentions,
+#         config_class=_CONFIG_FOR_DOC,
+#     )
     def forward(
         self,
         # input_ids=None,
@@ -328,12 +409,13 @@ class GPT2fromEmbedding(GPT2PreTrainedModel):
     """,
     GPT2_START_DOCSTRING,
 )
-class GPT2LMfromEmbedding(GPT2PreTrainedModel):
+class GPT2LMfromEmbedding(GPT2LMHeadModel):
     _keys_to_ignore_on_load_missing = [r"attn.masked_bias", r"attn.bias", r"lm_head.weight"]
 
     def __init__(self, config):
         super().__init__(config)
-        self.transformer = GPT2Model(config)
+        # self.transformer = GPT2Model(config)
+        self.transformer = GPT2fromEmbedding(config)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
         # Model parallel
@@ -397,13 +479,13 @@ class GPT2LMfromEmbedding(GPT2PreTrainedModel):
             "token_type_ids": token_type_ids,
         }
 
-    @add_start_docstrings_to_model_forward(GPT2_INPUTS_DOCSTRING)
-    @add_code_sample_docstrings(
-        processor_class=_PROCESSOR_FOR_DOC,
-        checkpoint=_CHECKPOINT_FOR_DOC,
-        output_type=CausalLMOutputWithCrossAttentions,
-        config_class=_CONFIG_FOR_DOC,
-    )
+#     @add_start_docstrings_to_model_forward(GPT2_INPUTS_DOCSTRING)
+#     @add_code_sample_docstrings(
+#         processor_class=_PROCESSOR_FOR_DOC,
+#         checkpoint=_CHECKPOINT_FOR_DOC,
+#         output_type=CausalLMOutputWithCrossAttentions,
+#         config_class=_CONFIG_FOR_DOC,
+#     )
     def forward(
         self,
         # input_ids=None,
@@ -506,9 +588,10 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
                 "or define `vocab_size` of your model's configuration."
             )
         
-        self.wav2vec2 = Wav2Vec2Model(config)
+        self.wav2vec2 = Wav2Vec2Model2(config)
+        self.dropout = nn.Dropout(config.final_dropout)
         
-        self.rnn_compressor = nn.GRU(input_size=config.hidden_size, hidden_size=config.hidden_size, num_layers=1, batch_first=True)
+        self.rnn_compressor = nn.GRU(input_size=config.hidden_size, hidden_size=(config.hidden_size + 1), num_layers=1, batch_first=True)
         self.adaPool = nn.AdaptiveMaxPool1d(config.n_positions, return_indices=True)
         self.n_hidden = config.hidden_size
 
@@ -534,12 +617,44 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
             param.requires_grad = False
     
     def freeze_rnn_compressor(self):
-        for param in self.wav2vec2.adapter.parameters():
+        for param in self.rnn_compressor.parameters():
             param.requires_grad = False
     
     def freeze_gpt_decoder(self):
-        for param in self.gpt2lm.parameters():
+        for param in self.gpt2lm.transformer.parameters():
             param.requires_grad = False
+    
+    def freeze_lm_head(self):
+        for param in self.gpt2lm.lm_head.parameters():
+            param.requires_grad = False
+
+    def unfreeze_feature_extractor(self):
+        for param in self.wav2vec2.feature_extractor.parameters():
+            param.requires_grad = True
+    
+    def unfreeze_feature_projection(self):
+        for param in self.wav2vec2.feature_projection.parameters():
+            param.requires_grad = True
+    
+    def unfreeze_wav2vec_encoder(self):
+        for param in self.wav2vec2.encoder.parameters():
+            param.requires_grad = True
+    
+    def unfreeze_wav2vec_adapter(self):
+        for param in self.wav2vec2.adapter.parameters():
+            param.requires_grad = True
+    
+    def unfreeze_rnn_compressor(self):
+        for param in self.rnn_compressor.parameters():
+            param.requires_grad = True
+    
+    def unfreeze_gpt_decoder(self):
+        for param in self.gpt2lm.transformer.parameters():
+            param.requires_grad = True
+    
+    def unfreeze_lm_head(self):
+        for param in self.gpt2lm.lm_head.parameters():
+            param.requires_grad = True
 
     @add_start_docstrings_to_model_forward(WAV_2_VEC_2_INPUTS_DOCSTRING)
     @add_code_sample_docstrings(
@@ -558,6 +673,7 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
         output_hidden_states_wav2vec=None, 
         return_dict_wav2vec=None,
 
+        output_attention_mask=None,  # text attention mask
         output_attentions_gpt2=None,
         output_hidden_states_gpt2=None, 
         return_dict_gpt2=None,
@@ -572,7 +688,8 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
             config.vocab_size - 1]`.
         """
 
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict_wav2vec = return_dict_wav2vec if return_dict_wav2vec is not None else self.config.use_return_dict
+        return_dict_gpt2 = return_dict_gpt2 if return_dict_gpt2 is not None else self.config.use_return_dict
 
         outputs = self.wav2vec2(
             input_values,
@@ -589,9 +706,9 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
         
         hidden_states = self.dropout(hidden_states) # size: (batch_size, seq_len_from_adapter, config.hidden_states=768)
 
-        embedding_w_attention_from_RNN = self.rnn_compressor(hidden_states) # batch_first is True. size: (batch_size, seq_len, config.hidden_states + 1)
-        word_indices = self.adaPool(embedding_w_attention_from_RNN[:,:,-1])[1]
-        word_embeddings = torch.gather(embedding_w_attention_from_RNN[:,:,:-1], 
+        output_from_RNN, _ = self.rnn_compressor(hidden_states) # batch_first is True. size: (batch_size, seq_len, config.hidden_states + 1)
+        word_indices = self.adaPool(output_from_RNN[:,:,-1])[1]
+        word_embeddings = torch.gather(output_from_RNN[:,:,:-1], 
                                        1, 
                                        word_indices.unsqueeze(-1).expand(-1,-1,self.n_hidden))
         
@@ -599,7 +716,7 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
         return self.gpt2lm(
             ### input_ids=None,
             # past_key_values=None,
-            attention_mask=None,
+            attention_mask=output_attention_mask,
             ### token_type_ids=None,
             position_ids=None,
             head_mask=None,
@@ -612,3 +729,4 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
             output_hidden_states=output_hidden_states_gpt2,
             return_dict=return_dict_gpt2,
         ) # Type: CausalLMOutputWithCrossAttentions
+

@@ -18,12 +18,12 @@ Speech processor class for Wav2Vec2GPT
 import warnings
 from contextlib import contextmanager
 
-from transformers.processing_utils import ProcessorMixin
+from transformers import ProcessorMixin
 from transformers import Wav2Vec2FeatureExtractor
 from transformers import GPT2Tokenizer
 
 
-class Wav2Vec2Processor(ProcessorMixin):
+class Wav2Vec2GPTProcessor(ProcessorMixin):
     r"""
     Constructs a Wav2Vec2 processor which wraps a Wav2Vec2 feature extractor and a Wav2Vec2 CTC tokenizer into a single
     processor.
