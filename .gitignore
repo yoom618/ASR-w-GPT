@@ -1,5 +1,6 @@
 wav-bert/
 wandb/
+data4/yoomcache
 
 # JetBrains PyCharm IDE
 .idea/

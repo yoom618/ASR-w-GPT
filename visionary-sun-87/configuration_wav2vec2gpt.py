@@ -289,8 +289,7 @@ class Wav2Vec2GPTConfig(PretrainedConfig):
         reorder_and_upcast_attn=False,
         **kwargs
     ):
-        super().__init__(pad_token_id=pad_token_id, bos_token_id=bos_token_id, eos_token_id=eos_token_id, **kwargs)
-        
+        # super().__init__(**kwargs, bos_token_id=bos_token_id, eos_token_id=eos_token_id)
         self.hidden_size = hidden_size
         self.feat_extract_norm = feat_extract_norm
         self.feat_extract_activation = feat_extract_activation
@@ -388,11 +387,14 @@ class Wav2Vec2GPTConfig(PretrainedConfig):
         self.reorder_and_upcast_attn = reorder_and_upcast_attn
 
         
-        self.pad_token_id = pad_token_id
+        self.pad_token_id = pad_token_id,
         self.bos_token_id = bos_token_id
         self.eos_token_id = eos_token_id
         for key in self.attribute_map:
             exec("self.%s = %s" % (key,self.attribute_map[key]))
+        
+
+        super().__init__(pad_token_id=pad_token_id, bos_token_id=bos_token_id, eos_token_id=eos_token_id, **kwargs)
 
 
     @property
