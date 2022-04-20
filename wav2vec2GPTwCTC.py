@@ -129,7 +129,6 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
                                      hidden_size=(config.hidden_size + 1), 
                                      num_layers=1, 
                                      # bias=False,
-                                     # dropout=0.1, # already in the front of GPT
                                      batch_first=True)
         self.adaPool = nn.AdaptiveMaxPool1d(config.n_positions, return_indices=True)
         self.n_hidden = config.hidden_size
@@ -205,57 +204,71 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
         }
 
     def freeze_feature_extractor(self):
+        self.wav2vec2.feature_extractor.eval()
         self.wav2vec2.feature_extractor._freeze_parameters()
     
     def freeze_feature_projection(self):
+        self.wav2vec2.feature_projection.eval()
         for param in self.wav2vec2.feature_projection.parameters():
             param.requires_grad = False
     
     def freeze_wav2vec_encoder(self):
+        self.wav2vec2.encoder.eval()
         for param in self.wav2vec2.encoder.parameters():
             param.requires_grad = False
     
     def freeze_wav2vec_adapter(self):
+        self.wav2vec2.adapter.eval()
         for param in self.wav2vec2.adapter.parameters():
             param.requires_grad = False
     
     def freeze_rnn_compressor(self):
+        self.rnn_compressor.eval()
         for param in self.rnn_compressor.parameters():
             param.requires_grad = False
     
     def freeze_gpt_decoder(self):
+        self.transformer.eval()
         for param in self.transformer.parameters():
             param.requires_grad = False
     
     def freeze_lm_head(self):
+        self.lm_head.eval()
         for param in self.lm_head.parameters():
             param.requires_grad = False
 
     def unfreeze_feature_extractor(self):
+        self.wav2vec2.feature_extractor.train()
         for param in self.wav2vec2.feature_extractor.parameters():
             param.requires_grad = True
     
     def unfreeze_feature_projection(self):
+        self.wav2vec2.feature_projection.train()
         for param in self.wav2vec2.feature_projection.parameters():
             param.requires_grad = True
     
     def unfreeze_wav2vec_encoder(self):
+        self.wav2vec2.encoder.train()
         for param in self.wav2vec2.encoder.parameters():
             param.requires_grad = True
     
     def unfreeze_wav2vec_adapter(self):
+        self.wav2vec2.adapter.train()
         for param in self.wav2vec2.adapter.parameters():
             param.requires_grad = True
     
     def unfreeze_rnn_compressor(self):
+        self.rnn_compressor.train()
         for param in self.rnn_compressor.parameters():
             param.requires_grad = True
     
     def unfreeze_gpt_decoder(self):
+        self.transformer.train()
         for param in self.transformer.parameters():
             param.requires_grad = True
     
     def unfreeze_lm_head(self):
+        self.lm_head.train()
         for param in self.lm_head.parameters():
             param.requires_grad = True
 
@@ -313,22 +326,46 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
         ############# Feature Propagation & Peak Detection via RNN : Proposed #############
 
         output_from_RNN, _ = self.rnn_compressor(hidden_states) # size: (batch_size, seq_len, config.hidden_states + 1)
-        # diff = output_from_RNN[:,:-1,-1] - output_from_RNN[:,1:,-1] # 학습 잘 됨. wandb:149
+        diff = output_from_RNN[:,:-1,-1] - output_from_RNN[:,1:,-1] # wandb:149 - BEST
         # diff = nn.ConstantPad2d((1, 0, 0, 0,), 0)(output_from_RNN[:,:-1,-1]) - output_from_RNN[:,:,-1] # wandb:150
-        diff = output_from_RNN[:,:,-1] - nn.ConstantPad2d((0, 1, 0, 0,), 0)(output_from_RNN[:,1:,-1]) # wandb:151 - best
+        # diff = output_from_RNN[:,:,-1] - nn.ConstantPad2d((0, 1, 0, 0,), 0)(output_from_RNN[:,1:,-1]) # wandb:151
         
-        ###### 1. Adjust Pooling - select `config.n_positions` intervals
-        peak_indices = self.adaPool(diff)[1] # 가장 급격하게 떨어지는 구간 앞
-        attention_mask = torch.ones_like(peak_indices, dtype=torch.long)
-        word_embeddings = torch.gather(output_from_RNN[:,:,:-1], 
-                                       1, 
-                                       peak_indices.unsqueeze(-1).expand(-1,-1,self.n_hidden))
+        
+        # ###### 1. Adjust Pooling - select `config.n_positions` intervals
+        # peak_indices = self.adaPool(diff)[1] # 가장 급격하게 떨어지는 구간 앞
+        # attention_mask = torch.ones_like(peak_indices, dtype=torch.long)
+        # word_embeddings = torch.gather(output_from_RNN[:,:,:-1], 
+        #                                1, 
+        #                                peak_indices.unsqueeze(-1).expand(-1,-1,self.n_hidden))
+        
         
         # ##### 2. Make attention via Threshold
         # threshold = 1.0
         # attention_mask = torch.where(diff > threshold, 1, 0) # threshold 이상으로 급격히 떨어지는 구간 앞
         # word_embeddings = output_from_RNN[:,:,:-1]
+        
+        
+        ###### 3. Select the least similar pair w/ inner product
+        # 예상되는 단점 : padding이 연속되는 뒷부분은 아예 선택되지 않아 길이가 짧은 문장에서 중복이 많이 걸릴 가능성..?????
+        # cos = nn.CosineSimilarity(dim=2, eps=1e-6)
+        # cos_sim = cos(output_from_RNN[:,:,:-1], nn.ConstantPad3d((0, 0, 0, 1, 0, 0,), 0)(output_from_RNN[:,1:,:-1]))
+        sim = (output_from_RNN[:,:-1,:-1] * output_from_RNN[:,1:,:-1]).sum(dim=2)
+        peak_indices = self.adaPool(-sim)[1] # 가장 유사도가 낮은 쌍 중 앞 부분이 선택됨
+        attention_mask = torch.ones_like(peak_indices, dtype=torch.long)
+        word_embeddings = torch.gather(output_from_RNN[:,:,:-1], 
+                                       1, 
+                                       peak_indices.unsqueeze(-1).expand(-1,-1,self.n_hidden))
+        
+        
+        
+#         ###### 4. Select the pair with lower similarity than given threshold
+#         threshold = 0.0
+#         sim = (output_from_RNN[:,:-1,:-1] * output_from_RNN[:,1:,:-1]).sum(dim=2)
+#         attention_mask = torch.where(sim < threshold, 1, 0) # threshold 이하로 떨어지는 구간 앞
+#         word_embeddings = output_from_RNN[:,:,:-1]
+        
 
+        
         ############# Feature2Text : Referred from GPT2LMHeadModel #############
 
         transformer_outputs = self.transformer(
@@ -374,33 +411,33 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
 
 
 
-            if labels.max() >= self.config.vocab_size:
-                raise ValueError(f"Label values must be <= vocab_size: {self.config.vocab_size}")
+#             if labels.max() >= self.config.vocab_size:
+#                 raise ValueError(f"Label values must be <= vocab_size: {self.config.vocab_size}")
 
-            # ctc_loss doesn't support fp16
-            log_probs = nn.functional.log_softmax(lm_logits, dim=-1, dtype=torch.float32).transpose(0, 1)
+#             # ctc_loss doesn't support fp16
+#             log_probs = nn.functional.log_softmax(lm_logits, dim=-1, dtype=torch.float32).transpose(0, 1)
         
-            # input_lengths for ctc_loss is defined from RNN peak detection
-            # this can be computed from attention_mask
-            input_lengths = (attention_mask > 0).sum(-1)
+#             # input_lengths for ctc_loss is defined from RNN peak detection
+#             # this can be computed from attention_mask
+#             input_lengths = (attention_mask > 0).sum(-1)
             
-            # assuming that padded tokens are filled with 'Ġ'
-            # unlike wav2vec we can get this information from given `output_attention_mask`
-            labels_mask = (output_attention_mask > 0)
-            target_lengths = labels_mask.sum(-1)
-            flattened_targets = labels.masked_select(labels_mask)
+#             # assuming that padded tokens are filled with 'Ġ'
+#             # unlike wav2vec we can get this information from given `output_attention_mask`
+#             labels_mask = (output_attention_mask > 0)
+#             target_lengths = labels_mask.sum(-1)
+#             flattened_targets = labels.masked_select(labels_mask)
             
-            # See https://pytorch.org/docs/stable/generated/torch.nn.functional.ctc_loss.html
-            with torch.backends.cudnn.flags(deterministic = True):
-                loss_ctc = nn.functional.ctc_loss(
-                    log_probs,
-                    flattened_targets,
-                    input_lengths,
-                    target_lengths,
-                    blank=self.config.pad_token_id,
-                    reduction=self.config.ctc_loss_reduction,
-                    zero_infinity=self.config.ctc_zero_infinity,
-                ) / self.config.n_positions
+#             # See https://pytorch.org/docs/stable/generated/torch.nn.functional.ctc_loss.html
+#             with torch.backends.cudnn.flags(deterministic = True):
+#                 loss_ctc = nn.functional.ctc_loss(
+#                     log_probs,
+#                     flattened_targets,
+#                     input_lengths,
+#                     target_lengths,
+#                     blank=self.config.pad_token_id,
+#                     reduction=self.config.ctc_loss_reduction,
+#                     zero_infinity=self.config.ctc_zero_infinity,
+#                 ) / self.config.n_positions
             
             loss = loss_ce + loss_ctc + loss_peak
 

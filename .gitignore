@@ -135,3 +135,4 @@ data-bin/
 
 # Experimental Folder
 experimental/*
+dataset/dataset-vctk-16k.pkl
