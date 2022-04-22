@@ -136,3 +136,7 @@ data-bin/
 # Experimental Folder
 experimental/*
 dataset/dataset-vctk-16k.pkl
+well-performed/swift-capybara-209/checkpoint/unfreeze-adapter-rnn-lm/checkpoint-66885/optimizer.pt
+well-performed/swift-capybara-209/checkpoint/unfreeze-adapter-rnn-lm/checkpoint-66885/pytorch_model.bin
+well-performed/swift-capybara-209/checkpoint/unfreeze-adapter-rnn-lm/checkpoint-73500/optimizer.pt
+well-performed/swift-capybara-209/checkpoint/unfreeze-adapter-rnn-lm/checkpoint-73500/pytorch_model.bin

@@ -125,7 +125,7 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
         self.dropout = nn.Dropout(config.final_dropout)
         
         self.rnn_compressor = nn.GRU(input_size=config.hidden_size, 
-                                     hidden_size=(config.hidden_size + 1), 
+                                     hidden_size=config.hidden_size, 
                                      num_layers=1, 
                                      # bias=False,
                                      batch_first=True)
@@ -134,7 +134,6 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
 
 
         self.transformer = GPT2Model(config)
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # Model parallel
         self.model_parallel = False
         self.device_map = None
@@ -169,7 +168,7 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
         self.transformer.wte = new_embeddings
 
     def get_output_embeddings(self):
-        return self.lm_head
+        return None
 
     def set_output_embeddings(self, new_embeddings):
         self.lm_head = new_embeddings
@@ -230,11 +229,6 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
         self.transformer.eval()
         for param in self.transformer.parameters():
             param.requires_grad = False
-    
-    def freeze_lm_head(self):
-        self.lm_head.eval()
-        for param in self.lm_head.parameters():
-            param.requires_grad = False
 
     def unfreeze_feature_extractor(self):
         self.wav2vec2.feature_extractor.train()
@@ -264,11 +258,6 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
     def unfreeze_gpt_decoder(self):
         self.transformer.train()
         for param in self.transformer.parameters():
-            param.requires_grad = True
-    
-    def unfreeze_lm_head(self):
-        self.lm_head.train()
-        for param in self.lm_head.parameters():
             param.requires_grad = True
 
     # @add_start_docstrings_to_model_forward(WAV_2_VEC_2_INPUTS_DOCSTRING)
@@ -324,35 +313,17 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
 
         ############# Feature Propagation & Peak Detection via RNN : Proposed #############
 
-        output_from_RNN, _ = self.rnn_compressor(hidden_states) # size: (batch_size, seq_len, config.hidden_states + 1)
-        
-        # diff = output_from_RNN[:,:-1,-1] - output_from_RNN[:,1:,-1] # wandb:149 - BEST
-        # # diff = nn.ConstantPad2d((1, 0, 0, 0,), 0)(output_from_RNN[:,:-1,-1]) - output_from_RNN[:,:,-1] # wandb:150
-        # # diff = output_from_RNN[:,:,-1] - nn.ConstantPad2d((0, 1, 0, 0,), 0)(output_from_RNN[:,1:,-1]) # wandb:151
-        
-        
-        # ###### 1. Adjust Pooling - select `config.n_positions` intervals
-        # peak_indices = self.adaPool(diff)[1] # 가장 급격하게 떨어지는 구간 앞
-        # attention_mask = torch.ones_like(peak_indices, dtype=torch.long)
-        # word_embeddings = torch.gather(output_from_RNN[:,:,:-1], 
-        #                                1, 
-        #                                peak_indices.unsqueeze(-1).expand(-1,-1,self.n_hidden))
-        
-        
-        # ##### 2. Make attention via Threshold
-        # threshold = 1.0
-        # attention_mask = torch.where(diff > threshold, 1, 0) # threshold 이상으로 급격히 떨어지는 구간 앞
-        # word_embeddings = output_from_RNN[:,:,:-1]
+        output_from_RNN, _ = self.rnn_compressor(hidden_states)
         
         
         ###### 3. Select the least similar pair w/ inner product
         # 예상되는 단점 : padding이 연속되는 뒷부분은 아예 선택되지 않아 길이가 짧은 문장에서 중복이 많이 걸릴 가능성..?????
         # cos = nn.CosineSimilarity(dim=2, eps=1e-6)
-        # cos_sim = cos(output_from_RNN[:,:,:-1], nn.ConstantPad3d((0, 0, 0, 1, 0, 0,), 0)(output_from_RNN[:,1:,:-1]))
-        sim = (output_from_RNN[:,:-1,:-1] * output_from_RNN[:,1:,:-1]).sum(dim=2)
+        # cos_sim = cos(output_from_RNN, nn.ConstantPad3d((0, 0, 0, 1, 0, 0,), 0)(output_from_RNN[:,1:,:]))
+        sim = (output_from_RNN[:,:-1,:] * output_from_RNN[:,1:,:]).sum(dim=2)
         peak_indices = self.adaPool(-sim)[1] # 가장 유사도가 낮은 쌍 중 앞 부분이 선택됨
         attention_mask = torch.ones_like(peak_indices, dtype=torch.long)
-        word_embeddings = torch.gather(output_from_RNN[:,:,:-1], 
+        word_embeddings = torch.gather(output_from_RNN, 
                                        1, 
                                        peak_indices.unsqueeze(-1).expand(-1,-1,self.n_hidden))
         
@@ -360,9 +331,9 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
         
 #         ###### 4. Select the pair with lower similarity than given threshold
 #         threshold = 0.0
-#         sim = (output_from_RNN[:,:-1,:-1] * output_from_RNN[:,1:,:-1]).sum(dim=2)
+#         sim = (output_from_RNN[:,:-1,:] * output_from_RNN[:,1:,:]).sum(dim=2)
 #         attention_mask = torch.where(sim < threshold, 1, 0) # threshold 이하로 떨어지는 구간 앞
-#         word_embeddings = output_from_RNN[:,:,:-1]
+#         word_embeddings = output_from_RNN
         
 
         
@@ -391,8 +362,10 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
         if self.model_parallel:
             torch.cuda.set_device(self.transformer.first_device)
             hidden_states = hidden_states.to(self.lm_head.weight.device)
-
-        lm_logits = self.lm_head(hidden_states)
+        
+        
+        
+        lm_logits = torch.matmul(hidden_states, self.transformer.wte.weight.transpose(1,0))
 
         ############# Computing Loss #############
         ############# CTC Loss : Referred from Wav2Vec2ForCTC #############
