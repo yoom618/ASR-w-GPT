@@ -227,7 +227,7 @@ class Wav2Vec2GPTConfig(PretrainedConfig):
         feat_proj_dropout=0.0,
         feat_quantizer_dropout=0.0,
         final_dropout=0.1,
-        layerdrop=0.1,
+        # layerdrop=0.1,
         initializer_range=0.02,
         layer_norm_eps=1e-5,
         feat_extract_norm="group",
@@ -268,7 +268,7 @@ class Wav2Vec2GPTConfig(PretrainedConfig):
         adapter_kernel_size=3,
         adapter_stride=2,
         num_adapter_layers=3,
-        # output_hidden_size=None,
+        output_hidden_size=None,
 
 
         n_positions=1024,
@@ -287,6 +287,11 @@ class Wav2Vec2GPTConfig(PretrainedConfig):
         use_cache=True,
         scale_attn_by_inverse_layer_idx=False,
         reorder_and_upcast_attn=False,
+            
+        
+        select_random = True,
+        loss_ver = 'ce',
+        
         **kwargs
     ):
         super().__init__(pad_token_id=pad_token_id, bos_token_id=bos_token_id, eos_token_id=eos_token_id, **kwargs)
@@ -310,7 +315,7 @@ class Wav2Vec2GPTConfig(PretrainedConfig):
         self.activation_dropout = activation_dropout
         self.feat_proj_dropout = feat_proj_dropout
         self.final_dropout = final_dropout
-        self.layerdrop = layerdrop
+        # self.layerdrop = layerdrop
         self.layer_norm_eps = layer_norm_eps
         self.initializer_range = initializer_range
         self.vocab_size = vocab_size
@@ -357,7 +362,10 @@ class Wav2Vec2GPTConfig(PretrainedConfig):
         self.adapter_kernel_size = adapter_kernel_size
         self.adapter_stride = adapter_stride
         self.num_adapter_layers = num_adapter_layers
-        self.output_hidden_size = hidden_size # HERE, we use output_hidden_size as GPT's hidden_size
+        if output_hidden_size is None:
+            self.output_hidden_size = hidden_size # HERE, we use output_hidden_size as GPT's hidden_size
+        else:
+            self.output_hidden_size = output_hidden_size
 
         # SequenceClassification-specific parameter. Feel free to ignore for other classes.
         self.classifier_proj_size = classifier_proj_size
@@ -393,7 +401,10 @@ class Wav2Vec2GPTConfig(PretrainedConfig):
         self.eos_token_id = eos_token_id
         for key in self.attribute_map:
             exec("self.%s = %s" % (key,self.attribute_map[key]))
-
+            
+        
+        self.select_random = select_random
+        self.loss_ver = loss_ver
 
     @property
     def inputs_to_logits_ratio(self):

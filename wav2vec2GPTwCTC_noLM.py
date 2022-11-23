@@ -125,9 +125,8 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
         self.dropout = nn.Dropout(config.final_dropout)
         
         self.rnn_compressor = nn.GRU(input_size=config.hidden_size, 
-                                     hidden_size=config.hidden_size, 
-                                     num_layers=1, 
-                                     # bias=False,
+                                     hidden_size=(config.hidden_size + 1), 
+                                     num_layers=1,
                                      batch_first=True)
         self.adaPool = nn.AdaptiveMaxPool1d(config.n_positions, return_indices=True)
         self.n_hidden = config.hidden_size
@@ -316,29 +315,51 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
         output_from_RNN, _ = self.rnn_compressor(hidden_states)
         
         
-        ###### 3. Select the least similar pair w/ inner product
-        # 예상되는 단점 : padding이 연속되는 뒷부분은 아예 선택되지 않아 길이가 짧은 문장에서 중복이 많이 걸릴 가능성..?????
-        # cos = nn.CosineSimilarity(dim=2, eps=1e-6)
-        # cos_sim = cos(output_from_RNN, nn.ConstantPad3d((0, 0, 0, 1, 0, 0,), 0)(output_from_RNN[:,1:,:]))
-        sim = (output_from_RNN[:,:-1,:] * output_from_RNN[:,1:,:]).sum(dim=2)
-        peak_indices = self.adaPool(-sim)[1] # 가장 유사도가 낮은 쌍 중 앞 부분이 선택됨
+        diff = output_from_RNN[:,:-1,-1] - output_from_RNN[:,1:,-1] # wandb:149 - BEST
+        # # diff = nn.ConstantPad2d((1, 0, 0, 0,), 0)(output_from_RNN[:,:-1,-1]) - output_from_RNN[:,:,-1] # wandb:150
+        # # diff = output_from_RNN[:,:,-1] - nn.ConstantPad2d((0, 1, 0, 0,), 0)(output_from_RNN[:,1:,-1]) # wandb:151
+        
+        
+        ###### 1. Adjust Pooling - select `config.n_positions` intervals
+        peak_indices = self.adaPool(diff)[1] # 가장 급격하게 떨어지는 구간 앞
         attention_mask = torch.ones_like(peak_indices, dtype=torch.long)
-        word_embeddings = torch.gather(output_from_RNN, 
+        word_embeddings = torch.gather(output_from_RNN[:,:,:-1], 
                                        1, 
                                        peak_indices.unsqueeze(-1).expand(-1,-1,self.n_hidden))
+        
+        
+        # ##### 2. Make attention via Threshold
+        # threshold = 1.0
+        # attention_mask = torch.where(diff > threshold, 1, 0) # threshold 이상으로 급격히 떨어지는 구간 앞
+        # word_embeddings = output_from_RNN[:,:,:-1]
+
+
+#         ###### 3. Select the least similar pair w/ inner product
+#         # 예상되는 단점 : padding이 연속되는 뒷부분은 아예 선택되지 않아 길이가 짧은 문장에서 중복이 많이 걸릴 가능성..?????
+#         # cos = nn.CosineSimilarity(dim=2, eps=1e-6)
+#         # cos_sim = cos(output_from_RNN[:,:,:-1], nn.ConstantPad3d((0, 0, 0, 1, 0, 0,), 0)(output_from_RNN[:,1:,:-1]))
+#         sim = (output_from_RNN[:,:-1,:-1] * output_from_RNN[:,1:,:-1]).sum(dim=2)
+#         peak_indices = self.adaPool(-sim)[1] # 가장 유사도가 낮은 쌍들을 골라, 그 중 앞 부분을 선택함
+#         attention_mask = torch.ones_like(peak_indices, dtype=torch.long)
+#         word_embeddings = torch.gather(output_from_RNN[:,:,:-1], 
+#                                        1, 
+#                                        peak_indices.unsqueeze(-1).expand(-1,-1,self.n_hidden))
         
         
         
 #         ###### 4. Select the pair with lower similarity than given threshold
 #         threshold = 0.0
-#         sim = (output_from_RNN[:,:-1,:] * output_from_RNN[:,1:,:]).sum(dim=2)
-#         attention_mask = torch.where(sim < threshold, 1, 0) # threshold 이하로 떨어지는 구간 앞
+#         sim = (output_from_RNN[:,:-1,:-1] * output_from_RNN[:,1:,:-1]).sum(dim=2)
+#         attention_mask = torch.where(sim < threshold, 1, 0, dtype=torch.long) # threshold 이하로 떨어지는 구간 앞
 #         word_embeddings = output_from_RNN
         
 
         
         ############# Feature2Text : Referred from GPT2LMHeadModel #############
-
+        
+        
+        
+        
         transformer_outputs = self.transformer(
             input_ids=None, # Not used in this model
             past_key_values=None, # Not used in this model
@@ -375,42 +396,45 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
             loss_ce, loss_ctc, loss_peak = 0.0, 0.0, 0.0
             
             
-#             # DO NOT Shift
-#             shift_logits = lm_logits[..., :, :].contiguous()
-#             shift_labels = labels[..., :].contiguous()
-#             # Flatten the tokens
-#             loss_fct = CrossEntropyLoss()
-#             loss_ce = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+#             # DO Shift
+#             shift_logits = lm_logits[..., :-1, :].contiguous()
+#             shift_labels = labels[..., 1:].contiguous()
+            # DO NOT Shift
+            shift_logits = lm_logits[..., :, :].contiguous()
+            shift_labels = labels[..., :].contiguous()
+            # Flatten the tokens
+            loss_fct = CrossEntropyLoss()
+            loss_ce = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
 
 
 
-            if labels.max() >= self.config.vocab_size:
-                raise ValueError(f"Label values must be <= vocab_size: {self.config.vocab_size}")
+#             if labels.max() >= self.config.vocab_size:
+#                 raise ValueError(f"Label values must be <= vocab_size: {self.config.vocab_size}")
 
-            # ctc_loss doesn't support fp16
-            log_probs = nn.functional.log_softmax(lm_logits, dim=-1, dtype=torch.float32).transpose(0, 1)
+#             # ctc_loss doesn't support fp16
+#             log_probs = nn.functional.log_softmax(lm_logits, dim=-1, dtype=torch.float32).transpose(0, 1)
         
-            # input_lengths for ctc_loss is defined from RNN peak detection
-            # this can be computed from attention_mask
-            input_lengths = (attention_mask > 0).sum(-1)
+#             # input_lengths for ctc_loss is defined from RNN peak detection
+#             # this can be computed from attention_mask
+#             input_lengths = (attention_mask > 0).sum(-1)
             
-            # assuming that padded tokens are filled with 'Ġ'
-            # unlike wav2vec we can get this information from given `output_attention_mask`
-            labels_mask = (output_attention_mask > 0)
-            target_lengths = labels_mask.sum(-1)
-            flattened_targets = labels.masked_select(labels_mask)
+#             # assuming that padded tokens are filled with 'Ġ'
+#             # unlike wav2vec we can get this information from given `output_attention_mask`
+#             labels_mask = (output_attention_mask > 0)
+#             target_lengths = labels_mask.sum(-1)
+#             flattened_targets = labels.masked_select(labels_mask)
             
-            # See https://pytorch.org/docs/stable/generated/torch.nn.functional.ctc_loss.html
-            with torch.backends.cudnn.flags(deterministic = True):
-                loss_ctc = nn.functional.ctc_loss(
-                    log_probs,
-                    flattened_targets,
-                    input_lengths,
-                    target_lengths,
-                    blank=self.config.pad_token_id,
-                    reduction=self.config.ctc_loss_reduction,
-                    zero_infinity=self.config.ctc_zero_infinity,
-                ) / self.config.n_positions
+#             # See https://pytorch.org/docs/stable/generated/torch.nn.functional.ctc_loss.html
+#             with torch.backends.cudnn.flags(deterministic = True):
+#                 loss_ctc = nn.functional.ctc_loss(
+#                     log_probs,
+#                     flattened_targets,
+#                     input_lengths,
+#                     target_lengths,
+#                     blank=self.config.pad_token_id,
+#                     reduction=self.config.ctc_loss_reduction,
+#                     zero_infinity=self.config.ctc_zero_infinity,
+#                 ) / self.config.n_positions
             
             loss = loss_ce + loss_ctc + loss_peak
 

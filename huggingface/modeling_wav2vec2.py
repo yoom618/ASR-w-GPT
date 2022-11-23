@@ -1044,46 +1044,54 @@ class Wav2Vec2GumbelVectorQuantizer(nn.Module):
         return codevectors, perplexity
 
 
-class Wav2Vec2Adapter(nn.Module):
+class Wav2Vec2Adapter(nn.Module): ############# MODIFIED #############
     def __init__(self, config):
         super().__init__()
 
-        # feature dim might need to be down-projected
-        if config.output_hidden_size != config.hidden_size:
-            self.proj = nn.Linear(config.hidden_size, config.output_hidden_size)
-            self.proj_layer_norm = nn.LayerNorm(config.output_hidden_size)
-        else:
-            self.proj = self.proj_layer_norm = None
-
-        self.layers = nn.ModuleList(Wav2Vec2AdapterLayer(config) for _ in range(config.num_adapter_layers))
-        self.layerdrop = config.layerdrop
+        # # feature dim might need to be down-projected
+        # if config.output_hidden_size != config.hidden_size:
+        #     self.proj = nn.Linear(config.hidden_size, config.output_hidden_size)
+        #     self.proj_layer_norm = nn.LayerNorm(config.output_hidden_size)
+        # else:
+        #     self.proj = self.proj_layer_norm = None
+        # self.proj = self.proj_layer_norm = None
+        
+        self.layers = nn.ModuleList(Wav2Vec2AdapterLayer(i, config) for i in range(config.num_adapter_layers))
+        # self.layerdrop = config.layerdrop  # 이거 왜 쓰는지 모르겠음...
 
     def forward(self, hidden_states):
-        # down project hidden_states if necessary
-        if self.proj is not None and self.proj_layer_norm is not None:
-            hidden_states = self.proj(hidden_states)
-            hidden_states = self.proj_layer_norm(hidden_states)
+        # # down project hidden_states if necessary
+        # if self.proj is not None and self.proj_layer_norm is not None:
+        #     hidden_states = self.proj(hidden_states)
+        #     hidden_states = self.proj_layer_norm(hidden_states)
 
         hidden_states = hidden_states.transpose(1, 2)
 
         for layer in self.layers:
-            layerdrop_prob = np.random.random()
-            if not self.training or (layerdrop_prob > self.layerdrop):
-                hidden_states = layer(hidden_states)
-
+        #     layerdrop_prob = np.random.random()
+        #     if not self.training or (layerdrop_prob > self.layerdrop):
+        #         hidden_states = layer(hidden_states)
+            hidden_states = layer(hidden_states)
+    
         hidden_states = hidden_states.transpose(1, 2)
         return hidden_states
 
 
-class Wav2Vec2AdapterLayer(nn.Module):
-    def __init__(self, config):
+class Wav2Vec2AdapterLayer(nn.Module): ############# MODIFIED #############
+    def __init__(self, layer_idx, config):
         super().__init__()
+        
+        output_hidden_list = [config.conv_dim[-1]] + config.output_hidden_size
+        input_size = output_hidden_list[layer_idx]
+        output_size = output_hidden_list[layer_idx + 1] * 2  # because gelu
+        
         self.conv = nn.Conv1d(
-            config.output_hidden_size,
-            2 * config.output_hidden_size,
-            config.adapter_kernel_size,
-            stride=config.adapter_stride,
-            padding=1,
+            input_size,
+            output_size,
+            config.adapter_kernel_size[layer_idx],
+            stride=config.adapter_stride[layer_idx],
+            padding=config.adapter_padding[layer_idx],
+            bias=config.adapter_bias,
         )
 
     def forward(self, hidden_states):
@@ -1156,8 +1164,8 @@ class Wav2Vec2PreTrainedModel(PreTrainedModel):
             input_lengths = _conv_out_length(input_lengths, kernel_size, stride)
 
         if add_adapter:
-            for _ in range(self.config.num_adapter_layers):
-                input_lengths = _conv_out_length(input_lengths, 1, self.config.adapter_stride)
+            for layer_idx in range(self.config.num_adapter_layers):
+                input_lengths = _conv_out_length(input_lengths, 1, self.config.adapter_stride[layer_idx])
 
         return input_lengths
 

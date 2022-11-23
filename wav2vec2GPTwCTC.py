@@ -34,11 +34,11 @@ class Wav2Vec2Model2(Wav2Vec2PreTrainedModel):
         super().__init__(config)
         self.config = config
         self.feature_extractor = Wav2Vec2FeatureEncoder(config)
-        self.feature_projection = Wav2Vec2FeatureProjection(config)
+        ### self.feature_projection = Wav2Vec2FeatureProjection(config)
 
         self.adapter = Wav2Vec2Adapter(config) if config.add_adapter else None
 
-        # Initialize weights and apply final processing
+        ##### Initialize weights and apply final processing
         self.post_init()
 
     def freeze_feature_extractor(self):
@@ -87,19 +87,29 @@ class Wav2Vec2Model2(Wav2Vec2PreTrainedModel):
         extract_features = self.feature_extractor(input_values)
         extract_features = extract_features.transpose(1, 2)
 
-        hidden_states, extract_features = self.feature_projection(extract_features)
+        ### hidden_states, _ = self.feature_projection(extract_features)
 
         if self.adapter is not None:
-            hidden_states = self.adapter(hidden_states)
+            # hidden_states = self.adapter(hidden_states)
+            hidden_states = self.adapter(extract_features)
+            
+            if not return_dict:
+                return (hidden_states, extract_features)
 
-        if not return_dict:
-            return (hidden_states, extract_features)
+            return Wav2Vec2BaseModelOutput(
+                last_hidden_state=hidden_states,
+                extract_features=extract_features,
+            )
+        
+        else:
+            if not return_dict:
+                return (extract_features)
 
-        return Wav2Vec2BaseModelOutput(
-            last_hidden_state=hidden_states,
-            extract_features=extract_features,
-        )
-
+            return Wav2Vec2BaseModelOutput(
+                # last_hidden_state=hidden_states,
+                extract_features=extract_features,
+            )
+            
 
 
 
@@ -121,26 +131,55 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
                 "or define `vocab_size` of your model's configuration."
             )
         
+        
+        if isinstance(config.output_hidden_size, int):
+            config.output_hidden_size = [config.output_hidden_size] * config.num_adapter_layers
+        
         self.wav2vec2 = Wav2Vec2Model2(config)
         self.dropout = nn.Dropout(config.final_dropout)
         
-        self.rnn_compressor = nn.GRU(input_size=config.hidden_size, 
-                                     hidden_size=(config.hidden_size + 1), 
-                                     num_layers=1, 
-                                     # bias=False,
-                                     batch_first=True)
-        self.adaPool = nn.AdaptiveMaxPool1d(config.n_positions, return_indices=True)
-        self.n_hidden = config.hidden_size
+        compress_input_size = config.output_hidden_size[config.num_adapter_layers - 1]
+        
+#         ##### 1. RNN Module
+#         self.compressor = nn.GRU(
+#             input_size=compress_input_size, 
+#             bidirectional=False, hidden_size=config.hidden_size, 
+#             num_layers=1, batch_first=True, bias=True
+#         )
+        
+        ##### 2. CNN Module
+        self.compressor = nn.Conv1d(
+            in_channels=compress_input_size, 
+            out_channels=config.hidden_size, 
+            kernel_size=3, stride=1,bias=True,
+        )
+        
+        ##### 3. ATTN Module
+        self.attn = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(
+                d_model=config.hidden_size, 
+                nhead=8,
+                dim_feedforward=config.n_embd//8,
+                batch_first=True
+            ), num_layers=2)
 
+
+        self.n_hidden = config.hidden_size
+        self.n_positions = config.n_positions
 
         self.transformer = GPT2Model(config)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        
+        
         # Model parallel
         self.model_parallel = False
         self.device_map = None
 
         # Initialize weights and apply final processing
         self.post_init()
+        
+        self.select_random = config.select_random
+        self.loss_ver = config.loss_ver
 
     @add_start_docstrings(PARALLELIZE_DOCSTRING)
     def parallelize(self, device_map=None):
@@ -221,9 +260,9 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
         for param in self.wav2vec2.adapter.parameters():
             param.requires_grad = False
     
-    def freeze_rnn_compressor(self):
-        self.rnn_compressor.eval()
-        for param in self.rnn_compressor.parameters():
+    def freeze_compressor(self):
+        self.compressor.eval()
+        for param in self.compressor.parameters():
             param.requires_grad = False
     
     def freeze_gpt_decoder(self):
@@ -256,9 +295,9 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
         for param in self.wav2vec2.adapter.parameters():
             param.requires_grad = True
     
-    def unfreeze_rnn_compressor(self):
-        self.rnn_compressor.train()
-        for param in self.rnn_compressor.parameters():
+    def unfreeze_compressor(self):
+        self.compressor.train()
+        for param in self.compressor.parameters():
             param.requires_grad = True
     
     def unfreeze_gpt_decoder(self):
@@ -270,7 +309,9 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
         self.lm_head.train()
         for param in self.lm_head.parameters():
             param.requires_grad = True
-
+    
+    
+    
     # @add_start_docstrings_to_model_forward(WAV_2_VEC_2_INPUTS_DOCSTRING)
     # @add_code_sample_docstrings(
     #     processor_class=_PROCESSOR_FOR_DOC,
@@ -312,134 +353,172 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
         outputs = self.wav2vec2(
             input_values,
             attention_mask=input_attention_mask,
+            # attention_mask=None,
             output_attentions=output_attentions_wav2vec,
             output_hidden_states=output_hidden_states_wav2vec,
             return_dict=return_dict_wav2vec,
         )
 
-        hidden_states = outputs.last_hidden_state
-        
-        hidden_states = self.dropout(hidden_states) # size: (batch_size, seq_len_from_adapter, config.hidden_states=768)
+        hidden_states_wav = self.dropout(outputs.last_hidden_state)
 
+        
+        ############# Feature Propagation : Proposed #############
+        
+        # ##### 1. RNN Module
+        # hidden_states_wav, _ = self.compressor(hidden_states_wav) 
+        ##### 2. CNN Module
+        hidden_states_wav = self.compressor(hidden_states_wav.transpose(1,2)).transpose(1,2)
+        ##### 3. ATTN Module
+        hidden_states_wav = self.attn(hidden_states_wav)
+        
 
-        ############# Feature Propagation & Peak Detection via RNN : Proposed #############
-
-        output_from_RNN, _ = self.rnn_compressor(hidden_states) # size: (batch_size, seq_len, config.hidden_states + 1)
+        ############# Peak Detection : Proposed #############
+        # NOTE: Peak Detection 후 attn을 적용하면 학습이 안 됨
         
-        # diff = output_from_RNN[:,:-1,-1] - output_from_RNN[:,1:,-1] # wandb:149 - BEST
-        # # diff = nn.ConstantPad2d((1, 0, 0, 0,), 0)(output_from_RNN[:,:-1,-1]) - output_from_RNN[:,:,-1] # wandb:150
-        # # diff = output_from_RNN[:,:,-1] - nn.ConstantPad2d((0, 1, 0, 0,), 0)(output_from_RNN[:,1:,-1]) # wandb:151
+        pooling_size = 256 if (self.training and self.loss_ver[:3]=='ctc') else 64
+        adaPool = nn.AdaptiveMaxPool1d(pooling_size, return_indices=True)
         
         
-        # ###### 1. Adjust Pooling - select `config.n_positions` intervals
-        # peak_indices = self.adaPool(diff)[1] # 가장 급격하게 떨어지는 구간 앞
-        # attention_mask = torch.ones_like(peak_indices, dtype=torch.long)
-        # word_embeddings = torch.gather(output_from_RNN[:,:,:-1], 
-        #                                1, 
-        #                                peak_indices.unsqueeze(-1).expand(-1,-1,self.n_hidden))
+#         ##### 1.1. cos difference (apply when cosine similarity is between 
+#         peak_min, threshold, peak_max = -1.0, -0.25, 1.0
+#         cos = nn.CosineSimilarity(dim=-1, eps=1e-10)
+#         peak = 1 - cos(hidden_states_wav[...,:-1,:], hidden_states_wav[...,1:,:])
+        
+        ##### 1.2. label difference
+        # NOTE: Skip pad token
+        # NOTE: Not using log_softmax since we have to compare the exact probability values
+        peak_min, threshold, peak_max = -1.0, 0.2, 1.0
+        peak = nn.functional.softmax(self.lm_head(hidden_states_wav), dim=-1)
+        peak = peak[..., :, np.arange(self.config.vocab_size) != self.config.pad_token_id]
+        peak = (peak[..., :-1, :] - peak[..., 1:, :]).max(dim=-1)[0]
+        
+        # ##### 2.1. using all N tokens
+        # pass
+        
+        ##### 2.2. use only upper than threshold
+        if self.training and self.select_random and self.loss_ver[:3]=='ctc':
+            rand_arr = peak_min + torch.rand_like(peak) * (threshold - peak_min)
+            peak = torch.where(peak > threshold, peak, rand_arr)
+        else:
+            rand_arr = torch.arange(peak_min, threshold, peak.size(1), device=peak.get_device()).repeat(peak.size(0), 1)
+            peak = torch.where(peak > threshold, peak, rand_arr)
+            # peak = torch.where(peak > threshold, peak, torch.tensor(threshold, device=peak.get_device()))
         
         
-        # ##### 2. Make attention via Threshold
-        # threshold = 1.0
-        # attention_mask = torch.where(diff > threshold, 1, 0) # threshold 이상으로 급격히 떨어지는 구간 앞
-        # word_embeddings = output_from_RNN[:,:,:-1]
         
-        
-        ###### 3. Select the least similar pair w/ inner product
-        # 예상되는 단점 : padding이 연속되는 뒷부분은 아예 선택되지 않아 길이가 짧은 문장에서 중복이 많이 걸릴 가능성..?????
-        # cos = nn.CosineSimilarity(dim=2, eps=1e-6)
-        # cos_sim = cos(output_from_RNN[:,:,:-1], nn.ConstantPad3d((0, 0, 0, 1, 0, 0,), 0)(output_from_RNN[:,1:,:-1]))
-        sim = (output_from_RNN[:,:-1,:-1] * output_from_RNN[:,1:,:-1]).sum(dim=2)
-        peak_indices = self.adaPool(-sim)[1] # 가장 유사도가 낮은 쌍 중 앞 부분이 선택됨
+        ##### 3.1. using only selected tokens (attention_mask ~= torch.ones)
+        _, peak_indices = adaPool(peak)
         attention_mask = torch.ones_like(peak_indices, dtype=torch.long)
-        word_embeddings = torch.gather(output_from_RNN[:,:,:-1], 
+        word_embeddings = torch.gather(hidden_states_wav, 
                                        1, 
                                        peak_indices.unsqueeze(-1).expand(-1,-1,self.n_hidden))
         
         
+        # ##### 3.2. using attention_mask
+        # ##### NOTE: Not working when the wav2vec output is longer than 1024(=n_position)
+        # peak_values, peak_indices = adaPool(peak)
+        # attention_mask = torch.where(peak >= peak_values.min(dim=1)[0].unsqueeze(-1).expand(-1,peak.size(1)), 1, 0)
+        # attention_mask = nn.functional.pad(attention_mask, (0,1,0,0), mode='constant', value=0)
+        # word_embeddings = hidden_states_wav
         
-#         ###### 4. Select the pair with lower similarity than given threshold
-#         threshold = 0.0
-#         sim = (output_from_RNN[:,:-1,:-1] * output_from_RNN[:,1:,:-1]).sum(dim=2)
-#         attention_mask = torch.where(sim < threshold, 1, 0) # threshold 이하로 떨어지는 구간 앞
-#         word_embeddings = output_from_RNN[:,:,:-1]
         
-
+        lm_logits = self.lm_head(word_embeddings)
+        
         
         ############# Feature2Text : Referred from GPT2LMHeadModel #############
-
-        transformer_outputs = self.transformer(
-            input_ids=None, # Not used in this model
-            past_key_values=None, # Not used in this model
-#             attention_mask=attention_mask,
-            attention_mask=None,
-            token_type_ids=None, # Not used in this model
-            position_ids=None, # Not used in this model
-            head_mask=None, # Not used in this model
-            inputs_embeds=word_embeddings,
-            encoder_hidden_states=None, # Not used in this model
-            encoder_attention_mask=None, # Not used in this model
-            use_cache=use_cache,
-            output_attentions=output_attentions_gpt2,
-            output_hidden_states=output_hidden_states_gpt2,
-            return_dict=return_dict_gpt2,
-        )
         
-        hidden_states = transformer_outputs[0]
+        if (not self.training) or (self.loss_ver[:2]=='ce'):
+            lm_logits_0 = lm_logits
+            transformer_outputs = self.transformer(
+                input_ids=None, # Not used in this model
+                past_key_values=None, # Not used in this model
+                attention_mask=attention_mask,
+                token_type_ids=None, # Not used in this model
+                position_ids=None, # Not used in this model
+                head_mask=None, # Not used in this model
+                inputs_embeds=word_embeddings,
+                encoder_hidden_states=None, # Not used in this model
+                encoder_attention_mask=None, # Not used in this model
+                use_cache=use_cache,
+                output_attentions=output_attentions_gpt2,
+                output_hidden_states=output_hidden_states_gpt2,
+                return_dict=return_dict_gpt2,
+            )
 
-        # Set device for model parallelism for GPT
-        if self.model_parallel:
-            torch.cuda.set_device(self.transformer.first_device)
-            hidden_states = hidden_states.to(self.lm_head.weight.device)
+            hidden_states = transformer_outputs[0]
 
-        lm_logits = self.lm_head(hidden_states)
+            # Set device for model parallelism for GPT
+            if self.model_parallel:
+                torch.cuda.set_device(self.transformer.first_device)
+                hidden_states = hidden_states.to(self.lm_head.weight.device)
+
+            lm_logits = self.lm_head(hidden_states)
+
 
         ############# Computing Loss #############
         ############# CTC Loss : Referred from Wav2Vec2ForCTC #############
 
-        loss = None
-        if labels is not None:
-            loss_ce, loss_ctc, loss_peak = 0.0, 0.0, 0.0
-            
-            
-#             # DO NOT Shift
-#             shift_logits = lm_logits[..., :, :].contiguous()
-#             shift_labels = labels[..., :].contiguous()
-#             # Flatten the tokens
-#             loss_fct = CrossEntropyLoss()
-#             loss_ce = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+        if labels is None:
+            return
 
-
-
-            if labels.max() >= self.config.vocab_size:
-                raise ValueError(f"Label values must be <= vocab_size: {self.config.vocab_size}")
-
+        if (not self.training) or (self.loss_ver[:3]=='ctc'):
             # ctc_loss doesn't support fp16
-            log_probs = nn.functional.log_softmax(lm_logits, dim=-1, dtype=torch.float32).transpose(0, 1)
-        
-            # input_lengths for ctc_loss is defined from RNN peak detection
-            # this can be computed from attention_mask
-            input_lengths = (attention_mask > 0).sum(-1)
-            
-            # assuming that padded tokens are filled with 'Ġ'
-            # unlike wav2vec we can get this information from given `output_attention_mask`
-            labels_mask = (output_attention_mask > 0)
-            target_lengths = labels_mask.sum(-1)
-            flattened_targets = labels.masked_select(labels_mask)
-            
+            log_probs_1 = nn.functional.log_softmax(lm_logits, dim=-1, dtype=torch.float32).transpose(0, 1)
+            input_lengths_1 = (attention_mask > 0).sum(-1)
+
+            labels_mask_1 = (output_attention_mask > 0)
+            labels_mask_1[..., 0] = False
+            target_lengths_1 = labels_mask_1.sum(-1)
+            flattened_targets_1 = labels.masked_select(labels_mask_1)
+
             # See https://pytorch.org/docs/stable/generated/torch.nn.functional.ctc_loss.html
             with torch.backends.cudnn.flags(deterministic = True):
                 loss_ctc = nn.functional.ctc_loss(
-                    log_probs,
-                    flattened_targets,
-                    input_lengths,
-                    target_lengths,
+                    log_probs_1,
+                    flattened_targets_1,
+                    input_lengths_1,
+                    target_lengths_1,
                     blank=self.config.pad_token_id,
-                    reduction=self.config.ctc_loss_reduction,
+                    # reduction=self.config.ctc_loss_reduction,
+                    reduction='mean',
                     zero_infinity=self.config.ctc_zero_infinity,
-                ) / self.config.n_positions
+                )
+
+        if (not self.training) or (self.loss_ver[:2]=='ce'):
             
-            loss = loss_ce + loss_ctc + loss_peak
+            # ### 1. DO NOT Shift
+            # shift_logits = lm_logits.contiguous()
+            # shift_labels = labels.contiguous()
+            # shift_labels = nn.functional.pad(shift_labels, [0,lm_logits.size(1)-labels.size(1),0,0], 
+            #                                  mode='constant', value=self.config.pad_token_id)
+            
+            ### 2. DO Shift
+            shift_logits = lm_logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            shift_labels = nn.functional.pad(shift_labels, [0,lm_logits.size(1)-labels.size(1),0,0], 
+                                             mode='constant', value=self.config.pad_token_id)
+            
+            
+            loss_fct = CrossEntropyLoss()
+            loss_ce = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+
+
+        # loss = loss_ce + loss_ctc
+        if self.training:
+            if self.loss_ver == 'ctc':
+                loss = loss_ctc
+            elif self.loss_ver == 'ce':
+                loss = loss_ce
+            elif self.loss_ver == 'ctc-ce':
+                loss = loss_ctc
+                self.loss_ver = 'ce-ctc'
+            elif self.loss_ver == 'ce-ctc':
+                loss = loss_ce
+                self.loss_ver = 'ctc-ce'
+        else:
+            loss = loss_ctc + loss_ce
+
+
 
         if not return_dict_gpt2:
             output = (lm_logits,) + transformer_outputs[1:]
@@ -448,10 +527,12 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
         return CausalLMOutputWithCrossAttentions(
             loss=loss,
             logits=lm_logits,
-            past_key_values=transformer_outputs.past_key_values,
-            hidden_states=transformer_outputs.hidden_states,
-            attentions=transformer_outputs.attentions,
-            cross_attentions=transformer_outputs.cross_attentions,
+#             logits=[lm_logits_0, lm_logits],
+            
+#             past_key_values=transformer_outputs.past_key_values,
+#             hidden_states=transformer_outputs.hidden_states,
+#             attentions=transformer_outputs.attentions,
+#             cross_attentions=transformer_outputs.cross_attentions,
         )
 
 
