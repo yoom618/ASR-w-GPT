@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" Wav2Vec2GPT model configuration"""
+""" Wav2Vec2 model configuration"""
 
 import functools
 import operator
@@ -23,12 +23,13 @@ from transformers.utils import logging
 
 logger = logging.get_logger(__name__)
 
-# WAV_2_VEC_2_GPT_PRETRAINED_CONFIG_ARCHIVE_MAP = {
-#     "wav2vec2gpt-base": "https://huggingface.co/facebook/wav2vec2-base-960h/resolve/main/config.json",
-# }
+WAV_2_VEC_2_PRETRAINED_CONFIG_ARCHIVE_MAP = {
+    "facebook/wav2vec2-base-960h": "https://huggingface.co/facebook/wav2vec2-base-960h/resolve/main/config.json",
+    # See all Wav2Vec2 models at https://huggingface.co/models?filter=wav2vec2
+}
 
 
-class Wav2Vec2GPTConfig(PretrainedConfig):
+class Wav2Vec2Config(PretrainedConfig):
     r"""
     This is the configuration class to store the configuration of a [`Wav2Vec2Model`]. It is used to instantiate an
     Wav2Vec2 model according to the specified arguments, defining the model architecture. Instantiating a configuration
@@ -41,10 +42,10 @@ class Wav2Vec2GPTConfig(PretrainedConfig):
 
     Args:
         vocab_size (`int`, *optional*, defaults to 32):
-            Vocabulary size of the Wav2Vec2GPT model. Defines the number of different tokens that can be represented by
-            the `inputs_ids` passed when calling [`Wav2Vec2GPTModel`]. Vocabulary size of the model. Defines the 
-            different tokens that can be represented by the *inputs_ids* passed to the forward method of 
-            [`Wav2Vec2GPTModel`].
+            Vocabulary size of the Wav2Vec2 model. Defines the number of different tokens that can be represented by
+            the `inputs_ids` passed when calling [`Wav2Vec2Model`] or [`TFWav2Vec2Model`]. Vocabulary size of the
+            model. Defines the different tokens that can be represented by the *inputs_ids* passed to the forward
+            method of [`Wav2Vec2Model`].
         hidden_size (`int`, *optional*, defaults to 768):
             Dimensionality of the encoder layers and the pooler layer.
         num_hidden_layers (`int`, *optional*, defaults to 12):
@@ -180,14 +181,6 @@ class Wav2Vec2GPTConfig(PretrainedConfig):
             Dimensionality of the encoder output layer. If not defined, this defaults to *hidden-size*. Only relevant
             if `add_adapter is True`.
 
-
-
-        n_positions (`int`, *optional*, defaults to 1024):
-            The maximum sequence length that this model might ever be used with. Typically set this to something large
-            just in case (e.g., 512 or 1024 or 2048).
-        n_embd (`int`, *optional*, defaults to 768):
-            Dimensionality of the embeddings and hidden states.
-
     Example:
 
     ```python
@@ -202,20 +195,11 @@ class Wav2Vec2GPTConfig(PretrainedConfig):
     >>> # Accessing the model configuration
     >>> configuration = model.config
     ```"""
-
-
-    model_type = "wav2vec2gpt"
-    keys_to_ignore_at_inference = ["past_key_values"]
-    attribute_map = {
-        "n_embd": "hidden_size",
-        "max_position_embeddings": "n_positions",
-        "n_head": "num_attention_heads",
-        "n_layer": "num_hidden_layers",
-    }
+    model_type = "wav2vec2"
 
     def __init__(
         self,
-        vocab_size=50257,
+        vocab_size=32,
         hidden_size=768,
         num_hidden_layers=12,
         num_attention_heads=12,
@@ -261,41 +245,17 @@ class Wav2Vec2GPTConfig(PretrainedConfig):
         tdnn_kernel=(5, 3, 3, 1, 1),
         tdnn_dilation=(1, 2, 3, 1, 1),
         xvector_output_dim=512,
-        pad_token_id=220, # blank index of GPT Tokenizer. `tokenizer.encoder['Ġ']`
-        bos_token_id=50256,
-        eos_token_id=50256,
+        pad_token_id=0,
+        bos_token_id=1,
+        eos_token_id=2,
         add_adapter=False,
         adapter_kernel_size=3,
         adapter_stride=2,
         num_adapter_layers=3,
         output_hidden_size=None,
-
-
-        n_positions=1024,
-        n_inner=None,
-        activation_function="gelu_new",
-        resid_pdrop=0.1,
-        embd_pdrop=0.1,
-        attn_pdrop=0.1,
-        layer_norm_epsilon=1e-5,
-        summary_type="cls_index",
-        summary_use_proj=True,
-        summary_activation=None,
-        summary_proj_to_labels=True,
-        summary_first_dropout=0.1,
-        scale_attn_weights=True,
-        use_cache=True,
-        scale_attn_by_inverse_layer_idx=False,
-        reorder_and_upcast_attn=False,
-            
-        
-        select_random = True,
-        loss_ver = 'ce',
-        
         **kwargs
     ):
-        super().__init__(pad_token_id=pad_token_id, bos_token_id=bos_token_id, eos_token_id=eos_token_id, **kwargs)
-        
+        super().__init__(**kwargs, pad_token_id=pad_token_id, bos_token_id=bos_token_id, eos_token_id=eos_token_id)
         self.hidden_size = hidden_size
         self.feat_extract_norm = feat_extract_norm
         self.feat_extract_activation = feat_extract_activation
@@ -362,10 +322,7 @@ class Wav2Vec2GPTConfig(PretrainedConfig):
         self.adapter_kernel_size = adapter_kernel_size
         self.adapter_stride = adapter_stride
         self.num_adapter_layers = num_adapter_layers
-        if output_hidden_size is None:
-            self.output_hidden_size = hidden_size # HERE, we use output_hidden_size as GPT's hidden_size
-        else:
-            self.output_hidden_size = output_hidden_size
+        self.output_hidden_size = output_hidden_size or hidden_size
 
         # SequenceClassification-specific parameter. Feel free to ignore for other classes.
         self.classifier_proj_size = classifier_proj_size
@@ -375,36 +332,6 @@ class Wav2Vec2GPTConfig(PretrainedConfig):
         self.tdnn_kernel = list(tdnn_kernel)
         self.tdnn_dilation = list(tdnn_dilation)
         self.xvector_output_dim = xvector_output_dim
-        
-        
-        self.vocab_size = vocab_size
-        self.n_positions = n_positions
-        self.n_inner = n_inner
-        self.activation_function = activation_function
-        self.resid_pdrop = resid_pdrop
-        self.embd_pdrop = embd_pdrop
-        self.attn_pdrop = attn_pdrop
-        self.layer_norm_epsilon = layer_norm_epsilon
-        self.summary_type = summary_type
-        self.summary_use_proj = summary_use_proj
-        self.summary_activation = summary_activation
-        self.summary_first_dropout = summary_first_dropout
-        self.summary_proj_to_labels = summary_proj_to_labels
-        self.scale_attn_weights = scale_attn_weights
-        self.use_cache = use_cache
-        self.scale_attn_by_inverse_layer_idx = scale_attn_by_inverse_layer_idx
-        self.reorder_and_upcast_attn = reorder_and_upcast_attn
-
-        
-        self.pad_token_id = pad_token_id
-        self.bos_token_id = bos_token_id
-        self.eos_token_id = eos_token_id
-        for key in self.attribute_map:
-            exec("self.%s = %s" % (key,self.attribute_map[key]))
-            
-        
-        self.select_random = select_random
-        self.loss_ver = loss_ver
 
     @property
     def inputs_to_logits_ratio(self):
