@@ -149,13 +149,19 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
         )
         
         ##### 2. ATTN Module
-        self.attn = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(
+        # self.attn = nn.TransformerEncoder(
+        #     nn.TransformerEncoderLayer(
+        #         d_model=config.hidden_size, 
+        #         nhead=8,
+        #         dim_feedforward=4 * config.hidden_size,
+        #         batch_first=True
+        #     ), num_layers=1)
+        
+        self.attn = nn.TransformerEncoderLayer(
                 d_model=config.hidden_size, 
-                nhead=8,
-                dim_feedforward=8 * config.hidden_size,
-                batch_first=True
-            ), num_layers=1)
+                nhead=config.nhead,
+                dim_feedforward=config.dim_feedforward,
+                batch_first=True)
 
         
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -168,6 +174,9 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
         self.ctc_zero_infinity = config.ctc_zero_infinity
         self.select_random = config.select_random
         self.loss_ver = config.loss_ver
+        
+        self.topk_size = config.topk_size
+        self.prev_window, self.post_window = config.prev_window, config.post_window
 
 
         ##### Initialize weights and apply final processing
@@ -213,15 +222,22 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
             return_dict=return_dict_wav2vec,
         ).last_hidden_state
 
-#         hidden_states_wav = self.dropout(hidden_states_wav)
+        # hidden_states_wav = self.dropout(hidden_states_wav)
         
         ############# Feature Propagation : Proposed #############
         
         ##### 1. CNN Module
         hidden_states_wav = self.compressor(hidden_states_wav.transpose(1,2)).transpose(1,2)
         hidden_states_wav = self.dropout(hidden_states_wav)
-#         # ##### 2. ATTN Module
-#         hidden_states_wav = self.attn(hidden_states_wav)
+        
+#         ##### 2. ATTN Module ... NOT WORKING WELL
+#         prev_window, post_window = self.prev_window, self.post_window
+#         wav_length = hidden_states_wav.size(1)
+#         src_mask = torch.zeros((wav_length, wav_length), dtype=torch.bool, device=hidden_states_wav.get_device())
+#         for i in range(wav_length):
+#             src_mask[i, max(0,i-prev_window):min(i+post_window+1,wav_length)] = True
+        
+#         hidden_states_wav = self.attn(hidden_states_wav, src_mask=src_mask)
         
 
         ############# Peak Detection : Proposed #############
@@ -229,17 +245,17 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
         ##### 1.1. cos difference
         # NOTE: the cosine values are almost positive (IDK why)
         # https://vaibhavgarg1982.medium.com/why-are-cosine-similarities-of-text-embeddings-almost-always-positive-6bd31eaee4d5
-        peak_min, threshold, peak_max = 1.-(1.), 1.-(.5), 1.-(-.5)
+        peak_min, threshold, peak_max = 1.-(1.), 1.-(.3), 1.-(-1.)
         cos = nn.CosineSimilarity(dim=-1, eps=1e-10)
         peak = 1 - cos(hidden_states_wav[..., :-1, :], hidden_states_wav[..., 1:, :])
         
-#         ##### 1.2. label difference
-#         # NOTE: Skip pad token
-#         # NOTE: Not using log_softmax since we have to compare the exact probability values
-#         peak_min, threshold, peak_max = -1.0, 0.5, 1.0
-#         peak = nn.functional.softmax(self.lm_head(hidden_states_wav), dim=-1)
-#         peak = peak[..., :, np.arange(self.vocab_size) != self.pad_token_id]
-#         peak = (peak[..., :-1, :] - peak[..., 1:, :]).max(dim=-1)[0]
+        # ##### 1.2. label difference ... NOT WORKING WELL AFTER stride attn
+        # # NOTE: Skip pad token
+        # # NOTE: Not using log_softmax since we have to compare the exact probability values
+        # peak_min, threshold, peak_max = -1.0, 0.5, 1.0
+        # peak = nn.functional.softmax(self.lm_head(hidden_states_wav), dim=-1)
+        # peak = peak[..., :, np.arange(self.vocab_size) != self.pad_token_id]
+        # peak = (peak[..., :-1, :] - peak[..., 1:, :]).max(dim=-1)[0]
         
         # ##### 2.1. using all N tokens
         # pass
@@ -252,14 +268,14 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
             rand_arr = torch.linspace(peak_min, threshold, seq_len, device=peak.get_device()).repeat(batch_size, 1)
             peak = torch.where(peak > threshold, peak, rand_arr)
         elif self.loss_ver[:3]=='ctc':
-            # ### RANDOM
-            # rand_arr = peak_min + torch.rand_like(peak) * (threshold - peak_min)
-            # ### pick back sequentially
-            # rand_arr = torch.linspace(peak_min, threshold, seq_len, device=peak.get_device()).repeat(batch_size, 1)
-            # ### pick front sequentially
-            # rand_arr = torch.linspace(threshold, peak_min, seq_len, device=peak.get_device()).repeat(batch_size, 1)
-            # peak = torch.where(peak > threshold, peak, rand_arr)
-            pass
+            if self.select_random:
+                # ### RANDOM
+                # rand_arr = peak_min + torch.rand_like(peak) * (threshold - peak_min)
+                ### pick front sequentially
+                rand_arr = torch.linspace(threshold, peak_min, seq_len, device=peak.get_device()).repeat(batch_size, 1)
+                peak = torch.where(peak > threshold, peak, rand_arr)
+            else:
+                pass
         else:  # 'ce'
             # ### RANDOM
             # rand_arr = peak_min + torch.rand_like(peak) * (threshold - peak_min)
@@ -272,16 +288,26 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
         
         
         ########## 3. select maximum token
-        topk_size = 48
         
-        _, peak_indices = peak.topk(topk_size, dim=-1, largest=True, sorted=False)
+        _, peak_indices = peak.topk(self.topk_size, dim=-1, largest=True, sorted=False)
         attention_mask = torch.ones_like(peak_indices, dtype=torch.long)
         word_embeddings = torch.gather(hidden_states_wav, 
                                        1, 
                                        peak_indices.unsqueeze(-1).expand(-1,-1,self.n_hidden))
         
         
-        word_embeddings = self.attn(word_embeddings)
+        ########## 4. sparse(stride) attention
+        
+        prev_window, post_window = self.prev_window, self.post_window
+        src_mask = torch.zeros((self.topk_size, self.topk_size), dtype=torch.bool, device=peak.get_device())
+        for i in range(self.topk_size):
+            src_mask[i, max(0, i-prev_window) : min(i+post_window+1, self.topk_size)] = True
+
+        word_embeddings = self.attn(word_embeddings, src_mask=src_mask)
+        
+        
+        ########## 5. compute logit
+        
         lm_logits = self.lm_head(word_embeddings)  # size : (batch_size, topk_size, vocab_size)
 
 
@@ -296,7 +322,7 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
 
         if 'ctc' in self.loss_ver:
             if labels.max() >= self.vocab_size:
-                raise ValueError(f"Label values must be <= vocab_size: {self.vocab_size}")
+                raise ValueError(f"Label values {labels.max()} must be <= vocab_size: {self.vocab_size}")
 
             # ctc_loss doesn't support fp16
             log_probs = F.log_softmax(lm_logits, dim=-1, dtype=torch.float32).transpose(0, 1)
@@ -326,8 +352,7 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
 
         if 'ce' in self.loss_ver:
         
-        
-            ########## 4. Gather valid text
+            ########## Gather valid text
 
             lm_logits_gathered = list()
             pred_ids = lm_logits.argmax(dim=-1)
@@ -336,20 +361,15 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
                 count_list = [len(list(_group)) for key, _group in groupby(pred_ids[i])]
                 count_list = [sum(count_list[:idx]) for idx in range(len(count_list))]
                 j = [count_list[idx] for idx in range(len(key_list)) if key_list[idx] != self.pad_token_id]
-                lm_logits_gathered.append(F.pad(lm_logits[i,j,:], [0,0,0,topk_size-len(j)]))
+                lm_logits_gathered.append(F.pad(lm_logits[i,j,:], [0,0,0,self.topk_size-len(j)]))
             lm_logits_gathered = torch.stack(lm_logits_gathered)
             
-            ### 1. DO NOT Shift
+            ########## Compute CE Loss
+
+            ### DO NOT Shift
             loss_fct = CrossEntropyLoss()
             loss_ce = loss_fct(lm_logits_gathered.contiguous().view(-1, lm_logits_gathered.size(-1)), 
-                               F.pad(labels.contiguous(), (0,lm_logits.size(1)-labels.size(1),0,0)).view(-1))      
-            
-            # ### 2. DO Shift
-            # shift_logits = lm_logits_gathered[..., :-1, :].contiguous()
-            # shift_labels = labels[..., 1:].contiguous()
-            # loss_fct = CrossEntropyLoss()
-            # loss_ce = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), 
-            #                    F.pad(shift_labels, (0,shift_logits.size(1)-shift_labels.size(1),0,0)).view(-1))     
+                               F.pad(labels.contiguous(), (0,lm_logits.size(1)-labels.size(1),0,0)).view(-1))    
 
 
         if self.loss_ver == 'ctc':

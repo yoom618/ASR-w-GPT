@@ -292,6 +292,12 @@ class Wav2Vec2GPTConfig(PretrainedConfig):
         select_random = True,
         loss_ver = 'ce',
         
+        nhead = 8,
+        dim_feedforward = 2048,
+        topk_size = 128,
+        prev_window = 128,
+        post_window = 128,
+        
         **kwargs
     ):
         super().__init__(pad_token_id=pad_token_id, bos_token_id=bos_token_id, eos_token_id=eos_token_id, **kwargs)
@@ -405,6 +411,12 @@ class Wav2Vec2GPTConfig(PretrainedConfig):
         
         self.select_random = select_random
         self.loss_ver = loss_ver
+        
+        self.nhead = nhead
+        self.dim_feedforward = dim_feedforward
+        self.topk_size = topk_size
+        self.prev_window, self.post_window = prev_window, post_window
+        
 
     @property
     def inputs_to_logits_ratio(self):
