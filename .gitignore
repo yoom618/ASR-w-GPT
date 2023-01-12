@@ -144,3 +144,4 @@ well-performed/swift-capybara-209/checkpoint/unfreeze-adapter-rnn-lm/checkpoint-
 dataset/libritts/dev-clean.pkl
 dataset/libritts/test-clean.pkl
 dataset/libritts/train-clean-100.pkl
+.DS_Store

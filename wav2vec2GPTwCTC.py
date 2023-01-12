@@ -149,19 +149,19 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
         )
         
         ##### 2. ATTN Module
-        # self.attn = nn.TransformerEncoder(
-        #     nn.TransformerEncoderLayer(
-        #         d_model=config.hidden_size, 
-        #         nhead=8,
-        #         dim_feedforward=4 * config.hidden_size,
-        #         batch_first=True
-        #     ), num_layers=1)
-        
-        self.attn = nn.TransformerEncoderLayer(
+        self.attn = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(
                 d_model=config.hidden_size, 
                 nhead=config.nhead,
                 dim_feedforward=config.dim_feedforward,
-                batch_first=True)
+                batch_first=True
+            ), num_layers=2)
+        
+        # self.attn = nn.TransformerEncoderLayer(
+        #         d_model=config.hidden_size, 
+        #         nhead=config.nhead,
+        #         dim_feedforward=config.dim_feedforward,
+        #         batch_first=True)
 
         
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -221,8 +221,6 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
             output_hidden_states=output_hidden_states_wav2vec,
             return_dict=return_dict_wav2vec,
         ).last_hidden_state
-
-        # hidden_states_wav = self.dropout(hidden_states_wav)
         
         ############# Feature Propagation : Proposed #############
         
@@ -230,14 +228,14 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
         hidden_states_wav = self.compressor(hidden_states_wav.transpose(1,2)).transpose(1,2)
         hidden_states_wav = self.dropout(hidden_states_wav)
         
-#         ##### 2. ATTN Module ... NOT WORKING WELL
-#         prev_window, post_window = self.prev_window, self.post_window
-#         wav_length = hidden_states_wav.size(1)
-#         src_mask = torch.zeros((wav_length, wav_length), dtype=torch.bool, device=hidden_states_wav.get_device())
-#         for i in range(wav_length):
-#             src_mask[i, max(0,i-prev_window):min(i+post_window+1,wav_length)] = True
+        # ##### 2. ATTN Module ... NOT WORKING WELL
+        # prev_window, post_window = self.prev_window, self.post_window
+        # wav_length = hidden_states_wav.size(1)
+        # src_mask = torch.zeros((wav_length, wav_length), dtype=torch.bool, device=hidden_states_wav.get_device())
+        # for i in range(wav_length):
+        #     src_mask[i, max(0,i-prev_window):min(i+post_window+1,wav_length)] = True
         
-#         hidden_states_wav = self.attn(hidden_states_wav, src_mask=src_mask)
+        # hidden_states_wav = self.attn(hidden_states_wav, src_mask=src_mask)
         
 
         ############# Peak Detection : Proposed #############
@@ -245,9 +243,9 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
         ##### 1.1. cos difference
         # NOTE: the cosine values are almost positive (IDK why)
         # https://vaibhavgarg1982.medium.com/why-are-cosine-similarities-of-text-embeddings-almost-always-positive-6bd31eaee4d5
-        peak_min, threshold, peak_max = 1.-(1.), 1.-(.3), 1.-(-1.)
+        peak_min, threshold, peak_max = -(1.), -(.5), -(-1.)
         cos = nn.CosineSimilarity(dim=-1, eps=1e-10)
-        peak = 1 - cos(hidden_states_wav[..., :-1, :], hidden_states_wav[..., 1:, :])
+        peak = - cos(hidden_states_wav[..., :-1, :], hidden_states_wav[..., 1:, :])
         
         # ##### 1.2. label difference ... NOT WORKING WELL AFTER stride attn
         # # NOTE: Skip pad token
@@ -281,10 +279,8 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
             # rand_arr = peak_min + torch.rand_like(peak) * (threshold - peak_min)
             ### pick back sequentially
             rand_arr = torch.linspace(peak_min, threshold, seq_len, device=peak.get_device()).repeat(batch_size, 1)
-            # ### pick front sequentially
-            # rand_arr = torch.linspace(threshold, peak_min, seq_len, device=peak.get_device()).repeat(batch_size, 1)
             peak = torch.where(peak > threshold, peak, rand_arr)
-        
+            
         
         
         ########## 3. select maximum token
@@ -298,13 +294,14 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
         
         ########## 4. sparse(stride) attention
         
-        prev_window, post_window = self.prev_window, self.post_window
-        src_mask = torch.zeros((self.topk_size, self.topk_size), dtype=torch.bool, device=peak.get_device())
-        for i in range(self.topk_size):
-            src_mask[i, max(0, i-prev_window) : min(i+post_window+1, self.topk_size)] = True
-
-        word_embeddings = self.attn(word_embeddings, src_mask=src_mask)
+        # prev_window, post_window = self.prev_window, self.post_window
+        # src_mask = torch.zeros((self.topk_size, self.topk_size), dtype=torch.bool, device=peak.get_device())
+        # for i in range(self.topk_size):
+        #     src_mask[i, max(0, i-prev_window) : min(i+post_window+1, self.topk_size)] = True
+        # word_embeddings = self.attn(word_embeddings, src_mask=src_mask)
         
+        
+        word_embeddings = self.attn(word_embeddings)
         
         ########## 5. compute logit
         
@@ -382,7 +379,8 @@ class Wav2Vec2GPTModel(Wav2Vec2PreTrainedModel):
             loss = loss_ctc
             self.loss_ver = 'ce-ctc'
         elif self.loss_ver == 'ce-ctc':
-            loss = loss_ce
+            loss = loss_ctc
+            # loss = loss_ce
             self.loss_ver = 'ctc-ce'
         else:
             pass
