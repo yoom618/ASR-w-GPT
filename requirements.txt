@@ -1,0 +1,14 @@
+torch
+torchvision
+torchaudio
+accelerate
+transformers
+huggingface_hub
+datasets
+tqdm
+soundfile
+librosa
+aiohttp
+ipywidgets
+prettyprinter
+numpy
