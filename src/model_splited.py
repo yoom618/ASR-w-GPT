@@ -1,5 +1,5 @@
 
-from typing import Optional, Union
+from typing import Union
 import torch
 import torch.nn as nn
 from transformers import AutoModel
@@ -158,9 +158,6 @@ class Wav2Vec2Mistral(nn.Module):
         self.asr2emb = Wav2Vec2Embedding(model_asr)
         self.emb2emb = Emb2Emb_adapter(model_asr.config.hidden_size, model_llm.config.hidden_size)
         self.emb2lm = Emb2Mistral(model_llm)
-
-        self.asr2emb.eval()
-        self.emb2lm.eval()
 
     def forward(self, audio, audio_attention_mask=None, **kwargs):
         asr_last_hidden_state, audio_attn_length = self.asr2emb(audio, audio_attention_mask)

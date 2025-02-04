@@ -89,8 +89,8 @@ def collate_fn_asr2llm(asr_model_name, llm_model_name, cache_dir=None, token=Non
         assert False, f'Unsupported ASR model: {asr_model_name}'
 
     if 'mistralai/' in llm_model_name:
-        from transformers import AutoTokenizer
-        tokenizer_llm = AutoTokenizer.from_pretrained(llm_model_name,
+        from transformers import AutoProcessor
+        tokenizer_llm = AutoProcessor.from_pretrained(llm_model_name,
                                                       cache_dir=cache_dir,
                                                       token=token)
     elif 'openai-community/gpt2' in llm_model_name:
