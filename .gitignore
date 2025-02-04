@@ -145,3 +145,4 @@ dataset/libritts/dev-clean.pkl
 dataset/libritts/test-clean.pkl
 dataset/libritts/train-clean-100.pkl
 .DS_Store
+scratch/output/*
